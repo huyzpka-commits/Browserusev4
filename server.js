@@ -1,14 +1,22 @@
 /**
- * server.js — Web app phân tích file qua Browser Use Cloud API (v4)
+ * server.js — Web app phân tích/xử lý file qua Browser Use Cloud API (v4)
  *
- * Luồng xử lý POST /api/process:
- *   1. Nhận file upload (multer, lưu trong bộ nhớ — không ghi đĩa)
- *   2. Tạo Workspace trên Browser Use        → POST   /workspaces
- *   3. Đăng ký & tải file lên Workspace       → POST   /workspaces/{id}/files/upload (presigned PUT)
- *   4. Tạo Run (agent bắt đầu phân tích)      → POST   /runs  { task, workspaceId, attachedFileIds }
- *   5. Chờ Run về trạng thái terminal         → GET    /runs/{id}/status (poll)
- *   6. Lấy kết quả chi tiết                   → GET    /runs/{id}
- *   7. Trả JSON (kết quả text + raw) về UI, dọn dẹp Workspace
+ * Kiến trúc JOB-BASED (v1.1.0):
+ *   POST /api/process
+ *     → nhận file upload (multer, memoryStorage) + instructions (tuỳ chọn)
+ *     → tạo job, trả về 202 { jobId } NGAY LẬP TỨC
+ *     → xử lý ngầm:  1. Tạo Workspace            POST /workspaces
+ *                    2. Xin presigned URL         POST /workspaces/{id}/files/upload
+ *                    3. PUT bytes file            (presigned URL)
+ *                    4. Tạo Run                   POST /runs { task, workspaceId, attachedFileIds }
+ *                    5. Poll trạng thái          GET  /runs/{id}/status
+ *                    6. Poll events (tiến trình)  GET  /runs/{id}/events?after=<cursor>
+ *                    7. Lấy kết quả               GET  /runs/{id}
+ *   GET /api/jobs/:id
+ *     → UI poll endpoint này mỗi ~1.5s để nhận: phase, progress %, message, kết quả cuối.
+ *
+ * Lợi ích so với request đồng bộ (v1.0.0): hiển thị được % tiến trình, không bị proxy
+ * Cloudflare chặn request dài (>100s), người dùng có thể refesh trang và nối lại job.
  */
 
 require('dotenv').config();
@@ -16,6 +24,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const crypto = require('crypto');
 const axios = require('axios');
 const multer = require('multer');
 
@@ -37,6 +46,10 @@ const config = {
 const BROWSER_USE_MAX_FILE_BYTES = 50 * 1024 * 1024;
 // Trạng thái terminal của một Run theo API v4
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
+// Giới hạn ô "Yêu cầu xử lý" của người dùng
+const MAX_INSTRUCTIONS_CHARS = 5000;
+// Job hoàn tất được giữ trong RAM 30 phút cho UI tra cứu, sau đó tự xoá
+const JOB_TTL_MS = 30 * 60 * 1000;
 
 /* ============================== TIỆN ÍCH ============================== */
 
@@ -57,8 +70,29 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Tạo prompt cho agent dựa trên file đã upload vào workspace */
-function buildTaskPrompt(fileName) {
+/**
+ * Tạo prompt cho agent:
+ * - Có instructions → thực hiện đúng yêu cầu người dùng với file đính kèm
+ * - Không có → prompt phân tích tổng quát (hành vi mặc định)
+ */
+function buildTaskPrompt(fileName, instructions) {
+  if (instructions) {
+    return [
+      'Bạn là trợ lý AI đa năng. Trong workspace của run này có một file được đính kèm.',
+      `Tên file: "${fileName}" (nằm trong thư mục uploads/).`,
+      '',
+      '=== YÊU CẦU TỪ NGƯỜI DÙNG ===',
+      instructions,
+      '=== HẾT YÊU CẦU ===',
+      '',
+      'Lưu ý:',
+      '- Thực hiện yêu cầu trên với file đính kèm (nếu yêu cầu cần dùng file).',
+      '- Nếu yêu cầu là viết code: trình bày code đầy đủ trong khối markdown, đúng ngôn ngữ lập trình, có giải thích.',
+      '- Nếu yêu cầu là xử lý/số liệu: nêu rõ dữ liệu lấy từ đâu trong file.',
+      '- Phần giải thích bằng tiếng Việt; giữ nguyên code, số liệu, thuật ngữ gốc.',
+    ].join('\n');
+  }
+
   return [
     'Bạn là trợ lý phân tích dữ liệu. Trong workspace của run này có một file được đính kèm.',
     `Tên file: "${fileName}" (nằm trong thư mục uploads/).`,
@@ -132,7 +166,7 @@ function normalizeUpstreamError(err) {
 
 /* ============================== BROWSER USE API CLIENT ============================== */
 
-// Client mặc định cho các API cần key (workspaces, runs)
+// Client cho các API cần key (workspaces, runs, events)
 const buApi = axios.create({
   baseURL: config.apiBaseUrl,
   timeout: 30000,
@@ -143,21 +177,76 @@ const buApi = axios.create({
 });
 
 /**
- * Chờ Run về trạng thái terminal (completed/failed/cancelled).
- * - Poll endpoint nhẹ GET /runs/{id}/status theo POLL_INTERVAL_MS
+ * Rút gọn một event của run thành 1 dòng thông báo tiếng Việt hiển thị trên UI.
+ * Event có shape: { runId, id, ts, type, data } — data là object tuỳ theo type.
+ */
+function summarizeEvent(event) {
+  const d = event.data || {};
+  const candidates = [d.message, d.text, d.summary, d.title, d.thought, d.action, d.name, d.url];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) {
+      return `Agent: ${c.trim().slice(0, 140)}`;
+    }
+  }
+  const label = String(event.type || 'hoạt động').replace(/[_-]+/g, ' ');
+  return `Agent: ${label.charAt(0).toUpperCase() + label.slice(1)}`;
+}
+
+/**
+ * Đọc toàn bộ event mới của run (drain các trang `hasMore` theo khuyến nghị docs)
+ * rồi cập nhật % tiến trình + thông điệp cho job.
+ *
+ * Công thức %:  22 + 73 * n / (n + 8)   (n = số event đã thấy, tiệm cận 95%)
+ * → % tăng dần theo hoạt động thật của agent, chỉ nhảy 100% khi run terminal.
+ */
+async function drainEventsAndUpdateProgress(job, runId) {
+  let after = job.lastEventId || 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    const { data } = await buApi.get(`/runs/${runId}/events`, {
+      params: { after, limit: 200, include_output: false },
+    });
+    const events = data.events || [];
+    for (const ev of events) {
+      if (typeof ev.id === 'number' && ev.id > after) after = ev.id;
+      job.stepCount += 1;
+      job.message = summarizeEvent(ev);
+    }
+    hasMore = data.hasMore === true;
+  }
+  job.lastEventId = after;
+
+  const n = job.stepCount;
+  job.progress = Math.min(95, Math.round(22 + (73 * n) / (n + 8)));
+}
+
+/**
+ * Chờ Run về trạng thái terminal. Mỗi chu kỳ:
+ *   1. GET /runs/{id}/status  (rẻ, endpoint poll chuyên dụng)
+ *   2. GET /runs/{id}/events  (lấy delta để cập nhật tiến trình)
  * - Tôn trọng 429 (Retry-After / retry_after_seconds)
  * - Chấp nhận tối đa 3 lần poll lỗi liên tiếp rồi mới bỏ cuộc
  * - Quá TASK_TIMEOUT_MS → 504 (run phía Browser Use có thể vẫn đang chạy)
  */
-async function waitForRunCompletion(runId) {
+async function waitForRunCompletion(job, runId) {
   const deadline = Date.now() + config.taskTimeoutMs;
   let consecutiveFailures = 0;
 
   while (Date.now() < deadline) {
     try {
-      const { data } = await buApi.get(`/runs/${runId}/status`);
+      const { data: statusData } = await buApi.get(`/runs/${runId}/status`);
+      await drainEventsAndUpdateProgress(job, runId);
       consecutiveFailures = 0;
-      if (TERMINAL_STATUSES.includes(data.status)) return data.status;
+
+      if (TERMINAL_STATUSES.includes(statusData.status)) return statusData.status;
+
+      if (statusData.status === 'queued' || statusData.status === 'dispatching') {
+        job.phase = 'queued';
+        if (!job.message) job.message = 'Run đang trong hàng đợi…';
+      } else {
+        job.phase = 'running';
+      }
     } catch (err) {
       if (err.response && err.response.status === 429) {
         const bodyRetry = err.response.data && err.response.data.retry_after_seconds;
@@ -168,7 +257,7 @@ async function waitForRunCompletion(runId) {
       consecutiveFailures += 1;
       if (consecutiveFailures >= 3) {
         const normalized = normalizeUpstreamError(err);
-        throw new ApiError(normalized.status, `Không lấy được trạng thái run: ${normalized.message}`, normalized.details);
+        throw new ApiError(normalized.status, `Không theo dõi được run: ${normalized.message}`, normalized.details);
       }
     }
     await sleep(config.pollIntervalMs);
@@ -182,6 +271,173 @@ async function waitForRunCompletion(runId) {
   // Giữ lại workspace để run có thể tiếp tục chạy phía cloud
   timeoutError.keepWorkspace = true;
   throw timeoutError;
+}
+
+/* ============================== JOB STORE ============================== */
+
+const jobs = new Map();
+
+function createJob() {
+  const job = {
+    id: crypto.randomUUID(),
+    status: 'processing', // processing | completed | failed
+    phase: 'uploading',   // uploading | queued | running | done | failed
+    progress: 0,
+    message: 'Đang chuẩn bị…',
+    runId: null,
+    workspaceId: null,
+    stepCount: 0,
+    lastEventId: 0,
+    startedAt: Date.now(),
+    finishedAt: null,
+    result: null, // response đầy đủ khi completed
+    httpStatus: null,
+    error: null,
+    details: null,
+  };
+  jobs.set(job.id, job);
+  return job;
+}
+
+// Dọn job đã kết thúc quá 30 phút (job đang chạy không bị xoá)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of jobs) {
+    if (job.status !== 'processing' && job.finishedAt && now - job.finishedAt > JOB_TTL_MS) {
+      jobs.delete(id);
+    }
+  }
+}, 5 * 60 * 1000).unref();
+
+/**
+ * Toàn bộ pipeline xử lý 1 job — chạy nền, mọi lỗi được ghi vào job.
+ */
+async function processJob(job, uploadedFile, instructions) {
+  let keepWorkspace = false;
+  try {
+    const file = {
+      name: uploadedFile.originalname,
+      contentType: uploadedFile.mimetype || 'application/octet-stream',
+      size: uploadedFile.size,
+    };
+    const task = buildTaskPrompt(file.name, instructions);
+
+    // --- Bước 1: Tạo workspace ---
+    job.message = 'Tạo workspace trên Browser Use…';
+    job.progress = 4;
+    const workspaceRes = await withStep('Tạo workspace trên Browser Use', () =>
+      buApi.post('/workspaces', { name: `webapp-${Date.now()}` })
+    );
+    job.workspaceId = workspaceRes.data.id;
+    if (!job.workspaceId) throw new ApiError(502, 'Browser Use không trả về workspace id.');
+    job.progress = 10;
+
+    // --- Bước 2: Xin presigned URL ---
+    job.message = 'Đăng ký upload file…';
+    const uploadRes = await withStep('Đăng ký upload file', () =>
+      buApi.post(`/workspaces/${job.workspaceId}/files/upload`, {
+        files: [{ name: file.name, contentType: file.contentType, size: file.size }],
+      })
+    );
+    const fileInfo = uploadRes.data.files && uploadRes.data.files[0];
+    if (!fileInfo || !fileInfo.uploadUrl) {
+      throw new ApiError(502, 'Browser Use không trả về presigned upload URL.');
+    }
+
+    // --- Bước 3: PUT bytes file ---
+    job.message = 'Đang tải file lên Browser Use…';
+    job.progress = 14;
+    await withStep('Tải file lên Browser Use', () =>
+      axios.put(fileInfo.uploadUrl, uploadedFile.buffer, {
+        // Presigned URL bị ghim theo Content-Type + Content-Length khai báo
+        headers: {
+          'Content-Type': file.contentType,
+          'Content-Length': String(file.size),
+        },
+        timeout: 120000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      })
+    );
+
+    // --- Bước 4: Tạo run ---
+    job.message = 'Khởi chạy agent…';
+    job.progress = 20;
+    const runBody = { task, workspaceId: job.workspaceId, attachedFileIds: [fileInfo.id] };
+    if (config.model) runBody.model = config.model;
+
+    const runRes = await withStep('Tạo run trên Browser Use', () => buApi.post('/runs', runBody));
+    job.runId = runRes.data.id;
+    if (!job.runId) throw new ApiError(502, 'Browser Use không trả về run id.', { response: runRes.data });
+    job.phase = 'queued';
+    job.progress = 22;
+    job.message = 'Run đã được tạo — agent đang bắt đầu…';
+
+    // --- Bước 5 + 6: Chờ agent (cập nhật tiến trình qua events) ---
+    const finalStatus = await withStep('Chờ agent xử lý', () => waitForRunCompletion(job, job.runId));
+
+    // --- Bước 7: Lấy kết quả ---
+    job.message = 'Đang lấy kết quả…';
+    job.progress = 97;
+    const summaryRes = await withStep('Lấy kết quả run', () => buApi.get(`/runs/${job.runId}`));
+    const run = summaryRes.data;
+
+    if (finalStatus !== 'completed') {
+      throw new ApiError(502, `Run kết thúc với trạng thái "${finalStatus}"${run.error ? `: ${run.error}` : ' (không có thông tin lỗi).'}`, {
+        runId: job.runId,
+        run,
+      });
+    }
+
+    job.result = {
+      success: true,
+      runId: job.runId,
+      status: run.status,
+      result: {
+        text: run.result && String(run.result).trim() ? run.result : '(Agent hoàn thành nhưng không trả về nội dung.)',
+        inputTokens: run.totalInputTokens,
+        outputTokens: run.totalOutputTokens,
+        costUsd: run.totalCostUsd,
+      },
+      file,
+      elapsedMs: Date.now() - job.startedAt,
+      run,
+    };
+    job.status = 'completed';
+    job.phase = 'done';
+    job.progress = 100;
+    job.message = 'Hoàn tất';
+  } catch (err) {
+    keepWorkspace = err.keepWorkspace === true;
+    if (err instanceof ApiError) {
+      job.httpStatus = err.status;
+      job.error = err.message;
+      job.details = err.details;
+    } else if (err.name === 'MulterError') {
+      job.httpStatus = 400;
+      job.error = `Lỗi upload file: ${err.message}`;
+    } else if (err.response) {
+      const normalized = normalizeUpstreamError(err);
+      job.httpStatus = normalized.status;
+      job.error = normalized.message;
+      job.details = normalized.details;
+    } else {
+      job.httpStatus = 502;
+      job.error = err.message || 'Lỗi không xác định khi xử lý job.';
+    }
+    if (job.workspaceId) {
+      job.details = { ...(job.details || {}), workspaceId: job.workspaceId };
+    }
+    job.status = 'failed';
+    job.phase = 'failed';
+  } finally {
+    job.finishedAt = Date.now();
+    // Dọn dẹp: archive workspace sau khi xong.
+    // Giữ lại workspace nếu timeout nhưng run vẫn đang chạy phía cloud.
+    if (job.workspaceId && !keepWorkspace) {
+      buApi.delete(`/workspaces/${job.workspaceId}`).catch(() => {});
+    }
+  }
 }
 
 /* ============================== APP ============================== */
@@ -213,14 +469,14 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-/* POST /api/process — nhận file, gửi Browser Use phân tích, chờ và trả kết quả */
+/**
+ * POST /api/process — nhận file + instructions, tạo job xử lý ngầm.
+ * Trả 202 { jobId } ngay; UI theo dõi qua GET /api/jobs/{jobId}.
+ * Request: multipart/form-data với field `file` (bắt buộc) và `instructions` (tuỳ chọn, ≤5000 ký tự).
+ */
 app.post('/api/process', upload.single('file'), async (req, res, next) => {
-  const startedAt = Date.now();
-  let workspaceId = null;
-  let lastError = null;
-
   try {
-    // --- Kiểm tra đầu vào ---
+    // --- Kiểm tra đầu vào (lỗi trả đồng bộ luôn) ---
     if (!config.apiKey) {
       throw new ApiError(500, 'Chưa cấu hình BROWSER_USE_API_KEY. Thêm key vào file .env (xem .env.example) rồi khởi động lại server.');
     }
@@ -234,93 +490,66 @@ app.post('/api/process', upload.single('file'), async (req, res, next) => {
       throw new ApiError(400, 'File rỗng (0 byte). Vui lòng chọn file có nội dung.');
     }
 
-    const file = {
-      name: req.file.originalname,
-      contentType: req.file.mimetype || 'application/octet-stream',
-      size: req.file.size,
-    };
-    const task = buildTaskPrompt(file.name);
+    // --- Ô "Yêu cầu xử lý" (tuỳ chọn) ---
+    const instructions = (typeof req.body.instructions === 'string' ? req.body.instructions : '')
+      .trim()
+      .slice(0, MAX_INSTRUCTIONS_CHARS);
 
-    // --- Bước 1: Tạo workspace ---
-    const workspaceRes = await withStep('Tạo workspace trên Browser Use', () =>
-      buApi.post('/workspaces', { name: `webapp-${Date.now()}` })
-    );
-    workspaceId = workspaceRes.data.id;
-    if (!workspaceId) throw new ApiError(502, 'Browser Use không trả về workspace id.');
+    const job = createJob();
+    // Chạy nền — lỗi được processJob ghi vào job, không ảnh hưởng response này
+    processJob(job, req.file, instructions).catch(() => {});
 
-    // --- Bước 2: Xin presigned URL rồi PUT file bytes lên đó ---
-    const uploadRes = await withStep('Đăng ký upload file', () =>
-      buApi.post(`/workspaces/${workspaceId}/files/upload`, {
-        files: [{ name: file.name, contentType: file.contentType, size: file.size }],
-      })
-    );
-    const fileInfo = uploadRes.data.files && uploadRes.data.files[0];
-    if (!fileInfo || !fileInfo.uploadUrl) {
-      throw new ApiError(502, 'Browser Use không trả về presigned upload URL.');
-    }
-
-    await withStep('Tải file lên Browser Use', () =>
-      axios.put(fileInfo.uploadUrl, req.file.buffer, {
-        // Presigned URL bị ghim theo Content-Type + Content-Length khai báo
-        headers: {
-          'Content-Type': file.contentType,
-          'Content-Length': String(file.size),
-        },
-        timeout: 120000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-      })
-    );
-
-    // --- Bước 3: Tạo run (agent bắt đầu làm việc) ---
-    const runBody = { task, workspaceId, attachedFileIds: [fileInfo.id] };
-    if (config.model) runBody.model = config.model;
-
-    const runRes = await withStep('Tạo run trên Browser Use', () => buApi.post('/runs', runBody));
-    const runId = runRes.data.id;
-    if (!runId) throw new ApiError(502, 'Browser Use không trả về run id.', { response: runRes.data });
-
-    // --- Bước 4 + 5: Chờ agent hoàn thành rồi lấy kết quả ---
-    await withStep('Chờ agent phân tích', () => waitForRunCompletion(runId));
-
-    const summaryRes = await withStep('Lấy kết quả run', () => buApi.get(`/runs/${runId}`));
-    const run = summaryRes.data;
-
-    if (run.status !== 'completed') {
-      throw new ApiError(502, `Run kết thúc với trạng thái "${run.status}"${run.error ? `: ${run.error}` : ' (không có thông tin lỗi).'}`, {
-        runId,
-        run,
-      });
-    }
-
-    // --- Trả kết quả về UI ---
-    res.json({
+    res.status(202).json({
       success: true,
-      runId,
-      status: run.status,
-      result: {
-        text: run.result && String(run.result).trim() ? run.result : '(Agent hoàn thành nhưng không trả về nội dung.)',
-        inputTokens: run.totalInputTokens,
-        outputTokens: run.totalOutputTokens,
-        costUsd: run.totalCostUsd,
-      },
-      file,
-      elapsedMs: Date.now() - startedAt,
-      run,
+      jobId: job.id,
+      message: 'Đã nhận job. Theo dõi tiến trình qua GET /api/jobs/{jobId}.',
     });
   } catch (err) {
-    lastError = err;
-    if (workspaceId) {
-      err.details = { ...(err.details || {}), workspaceId };
-    }
     next(err);
-  } finally {
-    // Dọn dẹp: archive workspace sau khi xong.
-    // Giữ lại workspace nếu client timeout nhưng run vẫn đang chạy phía cloud.
-    if (workspaceId && !(lastError && lastError.keepWorkspace)) {
-      buApi.delete(`/workspaces/${workspaceId}`).catch(() => {});
-    }
   }
+});
+
+/**
+ * GET /api/jobs/:id — endpoint cho UI poll tiến trình.
+ *   processing → { success, jobId, status, phase, progress, message, runId, stepCount, elapsedMs }
+ *   completed  → response đầy đủ như v1.0.0: { success, runId, status, result, file, elapsedMs, run }
+ *   failed     → { success: false, jobId, status, error, details } với HTTP code gốc của lỗi
+ */
+app.get('/api/jobs/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) {
+    return res.status(404).json({
+      success: false,
+      error: 'Không tìm thấy job (đã hết hạn 30 phút hoặc server đã khởi động lại).',
+    });
+  }
+
+  if (job.status === 'processing') {
+    return res.json({
+      success: true,
+      jobId: job.id,
+      status: 'processing',
+      phase: job.phase,
+      progress: job.progress,
+      message: job.message,
+      runId: job.runId,
+      stepCount: job.stepCount,
+      elapsedMs: Date.now() - job.startedAt,
+    });
+  }
+
+  if (job.status === 'completed') {
+    return res.json({ ...job.result, jobId: job.id, progress: 100 });
+  }
+
+  // failed
+  return res.status(job.httpStatus || 502).json({
+    success: false,
+    jobId: job.id,
+    status: 'failed',
+    error: job.error,
+    details: job.details,
+  });
 });
 
 /* 404 cho các API lạ (không ảnh hưởng static) */

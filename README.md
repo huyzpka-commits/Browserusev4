@@ -7,24 +7,32 @@ Web app upload file → AI agent trên **Browser Use Cloud API (v4)** phân tíc
 ## Tính năng
 
 - Kéo-thả / chọn file (tối đa 10MB mặc định, mọi định dạng: CSV, TXT, JSON, PDF, ảnh…)
+- **Ô "Yêu cầu xử lý" tuỳ chọn**: viết yêu cầu riêng cho agent — phân tích, viết code xử lý file, chuyển đổi dữ liệu… (để trống → phân tích tổng quát)
 - File được **upload thật lên Workspace** của Browser Use và đính kèm vào Run (`attachedFileIds`) — agent đọc được nội dung gốc của file
-- Loading state: spinner + đếm giây + trạng thái tiến trình
+- **% tiến trình theo thời gian thực**: progress bar + % + thông điệp hoạt động gần nhất của agent ("Agent: …"), tính từ Run Events thật của API v4
+- Refresh trang không mất job — UI tự nối lại job đang chạy qua `localStorage`
 - Kết quả hiển thị 2 tab: **Kết quả** (text tiếng Việt) và **JSON** (response đầy đủ của API)
 - Chip thông tin: model, tokens input/output, chi phí USD, thời gian chạy, Run ID
 - Xử lý lỗi đầy đủ (API key sai, hết credits, rate limit, timeout, file quá lớn…) — thông báo tiếng Việt
 - CORS mở sẵn cho frontend gọi cross-origin
 
-## Kiến trúc & luồng
+## Kiến trúc & luồng (job-based, v1.1.0)
 
 ```
-┌─────────────┐  multipart/form-data   ┌──────────────┐   REST v4 (X-Browser-Use-API-Key)   ┌──────────────────────┐
-│  index.html │ ───── POST /api/ ────▶ │  server.js   │ ── 1. POST /workspaces ───────────▶ │  Browser Use Cloud   │
-│ (Tailwind/  │      process           │  (Express)   │ ── 2. POST /workspaces/{id}/files/upload
- │ vanilla JS)│ ◀── JSON kết quả ────── │              │ ── 3. PUT bytes → presigned URL ──▶ │  (AI Agent + Browser)│
-└─────────────┘                        │              │ ── 4. POST /runs (task + file)      │                      │
-                                       │              │ ── 5. GET /runs/{id}/status (poll)  │                      │
-                                       │              │ ── 6. GET /runs/{id} (kết quả) ◀─── └──────────────────────┘
-                                       └──────────────┘
+┌─────────────┐ multipart(file+instructions) ┌──────────────┐  202 {jobId}  ┌──────────┐
+│  index.html │ ──── POST /api/process ────▶ │              │ ────────────▶ │ UI poll  │
+│ (Tailwind/  │                              │  server.js   │               │ 1.5s/lần │
+│  vanilla JS)│                              │  (Express)   │ ◀──────────── │ GET /api/│
+└─────────────┘                              │              │ phase, %,     │ jobs/{id}│
+                                              │   JOB NỀN:   │ message, kết  └──────────┘
+                                              │  1. POST /workspaces         │ REST v4 (X-Browser-Use-API-Key)
+                                              │  2. POST /workspaces/{id}/files/upload
+                                              │  3. PUT bytes → presigned URL│
+                                              │  4. POST /runs (task+file)   ▼
+                                              │  5. GET /runs/{id}/status (poll 2s)  ┌─────────────────┐
+                                              │  6. GET /runs/{id}/events?after=... ▶ │ Browser Use Cloud│
+                                              │  7. GET /runs/{id} (kết quả)  ◀────  │ (AI Agent+Browser)│
+                                              └──────────────────────────────        └─────────────────┘
 ```
 
 ## Cấu trúc thư mục
@@ -93,7 +101,7 @@ Deploy trực tiếp repo (Render, Railway, Fly.io…):
 - Thêm biến môi trường `BROWSER_USE_API_KEY` (và `CORS_ORIGIN` nếu cần chặn origin)
 - Ví dụ Render: tạo Web Service → connect repo → Start command `npm start`
 
-> **Lưu ý:** một số proxy (Cloudflare miễn phí) giới hạn thời gian response ~100 giây (lỗi 524). Task phân tích lâu hơn hãy deploy trực tiếp lên Render/Railway thay vì qua tunnel, hoặc giảm `TASK_TIMEOUT_MS`.
+> **Lưu ý (không còn áp dụng cho luồng chính):** từ v1.1.0 app dùng job + poll ngắn (mỗi request < 2s) nên **không bị** giới hạn ~100 giây của proxy Cloudflare nữa — chạy qua tunnel thoải mái kể cả task dài.
 
 ## API nội bộ
 
@@ -103,33 +111,51 @@ Deploy trực tiếp repo (Render, Railway, Fly.io…):
 { "ok": true, "apiKeyConfigured": true, "model": "(default của Browser Use)", "maxFileSizeBytes": 10485760, "uptimeSeconds": 12 }
 ```
 
-### `POST /api/process` — `multipart/form-data`, field `file`
+### `POST /api/process` — `multipart/form-data`, field `file` (bắt buộc) + `instructions` (tuỳ chọn)
 
-Response **thành công**:
+Trả về **202 ngay lập tức**:
+
+```json
+{ "success": true, "jobId": "9b2c…", "message": "Đã nhận job. Theo dõi tiến trình qua GET /api/jobs/{jobId}." }
+```
+
+Lỗi đầu vào (thiếu file, thiếu key, file quá lớn…) vẫn trả đồng bộ: `{ "success": false, "error": "…", "details": { } }`
+
+### `GET /api/jobs/{jobId}` — poll tiến trình (UI gọi mỗi 1.5s)
+
+**Đang xử lý:**
 
 ```json
 {
-  "success": true,
-  "runId": "9b2c…",
-  "status": "completed",
-  "result": {
-    "text": "Tóm tắt nội dung file…",
-    "inputTokens": 1234,
-    "outputTokens": 567,
-    "costUsd": "0.012"
-  },
+  "success": true, "jobId": "9b2c…", "status": "processing",
+  "phase": "running", "progress": 66,
+  "message": "Agent: Đang tổng hợp kết quả",
+  "runId": "1a2b…", "stepCount": 8, "elapsedMs": 21300
+}
+```
+
+**Hoàn tất** (giữ nguyên shape kết quả như v1.0.0):
+
+```json
+{
+  "success": true, "runId": "9b2c…", "status": "completed", "jobId": "…", "progress": 100,
+  "result": { "text": "Tóm tắt nội dung file…", "inputTokens": 1234, "outputTokens": 567, "costUsd": "0.012" },
   "file": { "name": "data.csv", "contentType": "text/csv", "size": 2048 },
   "elapsedMs": 45000,
   "run": { "…": "RunSummary đầy đủ từ Browser Use API v4" }
 }
 ```
 
-Response **lỗi**: `{ "success": false, "error": "thông báo tiếng Việt", "details": { … } }`
+**Thất bại:** `{ "success": false, "jobId": "…", "status": "failed", "error": "thông báo tiếng Việt", "details": { } }` · **Job hết hạn / server restart:** 404.
 
-Test bằng curl:
+Test bằng curl (2 bước):
 
 ```bash
-curl -X POST http://localhost:3000/api/process -F "file=@data.csv"
+# Bước 1 — tạo job (thêm -F "instructions=<yêu cầu của bạn>" nếu muốn)
+JOB_ID=$(curl -s -X POST http://localhost:3000/api/process -F "file=@data.csv" | sed -E 's/.*"jobId":"([^"]+)".*/\1/')
+
+# Bước 2 — poll tới khi status là completed/failed
+curl -s http://localhost:3000/api/jobs/$JOB_ID
 ```
 
 ## Xử lý lỗi (bảng ánh xạ)
@@ -150,7 +176,8 @@ curl -X POST http://localhost:3000/api/process -F "file=@data.csv"
 - **"Chưa cấu hình BROWSER_USE_API_KEY"** → tạo `.env` từ `.env.example`, điền key, restart.
 - **402 hết credits** → nạp thêm tại dashboard Browser Use (pay-as-you-go).
 - **Kết quả text trống** → task có thể không cần duyệt web; agent vẫn trả `run.result` — xem tab JSON để kiểm tra `run.error`.
-- **Lỗi 524 qua tunnel Cloudflare** → task vượt 100s; deploy trực tiếp hoặc tăng tốc bằng model flash (đặt `BROWSER_USE_MODEL`).
+- **"Job không còn tồn tại"** → server đã khởi động lại hoặc job quá 30 phút — gửi lại yêu cầu.
+- **Refresh trang giữa lúc agent đang chạy** → không sao, UI tự nối lại job qua `localStorage`.
 
 ## Tài liệu liên quan
 

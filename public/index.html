@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Browser Use Cloud — Phân tích file</title>
+  <title>Browser Use Cloud — Phân tích &amp; xử lý file</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-100 min-h-screen text-slate-800 antialiased">
@@ -14,8 +14,8 @@
       <span class="inline-block px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 text-xs font-semibold tracking-wider">
         BROWSER USE CLOUD API · V4
       </span>
-      <h1 class="mt-3 text-3xl font-bold text-slate-900">Phân tích file với AI Agent</h1>
-      <p class="mt-2 text-slate-500">Tải file lên → Agent phân tích trên Browser Use Cloud → Nhận kết quả.</p>
+      <h1 class="mt-3 text-3xl font-bold text-slate-900">Phân tích &amp; xử lý file với AI Agent</h1>
+      <p class="mt-2 text-slate-500">Tải file lên + viết yêu cầu → Agent thực hiện trên Browser Use Cloud → Nhận kết quả.</p>
     </header>
 
     <!-- ==================== CARD CHÍNH ==================== -->
@@ -23,7 +23,7 @@
 
       <!-- Khu vực kéo-thả / chọn file -->
       <div id="dropzone"
-           class="border-2 border-dashed border-slate-300 rounded-xl p-8 sm:p-10 text-center cursor-pointer transition-colors hover:border-indigo-500 hover:bg-indigo-50/40">
+           class="border-2 border-dashed border-slate-300 rounded-xl p-6 sm:p-8 text-center cursor-pointer transition-colors hover:border-indigo-500 hover:bg-indigo-50/40">
         <input type="file" id="fileInput" class="hidden" />
         <svg class="mx-auto w-10 h-10 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.5"
              viewBox="0 0 24 24">
@@ -54,6 +54,19 @@
         </button>
       </div>
 
+      <!-- Ô "Yêu cầu xử lý" (tuỳ chọn) -->
+      <div class="mt-4">
+        <label for="instructions" class="block text-sm font-medium text-slate-700 mb-1.5">
+          Yêu cầu xử lý <span class="font-normal text-slate-400">(tuỳ chọn)</span>
+        </label>
+        <textarea id="instructions" rows="3" maxlength="5000"
+                  placeholder="Ví dụ: Viết code Python tính tổng doanh thu theo từng sản phẩm… / Tóm tắt file thành 5 gạch đầu dòng… / Chuyển dữ liệu sang JSON…"
+                  class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-500 resize-y"></textarea>
+        <p class="mt-1 text-xs text-slate-400">
+          Để trống nếu chỉ muốn agent phân tích tổng quát file. Viết bằng tiếng Việt hoặc tiếng Anh đều được (tối đa 5000 ký tự).
+        </p>
+      </div>
+
       <!-- Nút Xử lý -->
       <button id="processBtn" disabled
               class="mt-5 w-full inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-6 py-3.5 text-white font-semibold shadow-sm transition hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:cursor-not-allowed disabled:opacity-50">
@@ -64,8 +77,17 @@
         <span id="btnLabel">Xử lý</span>
       </button>
 
-      <!-- Trạng thái đang xử lý -->
-      <p id="statusText" class="hidden mt-4 text-center text-sm text-indigo-600"></p>
+      <!-- Tiến trình (% + thông điệp agent) -->
+      <div id="progressBox" class="hidden mt-5">
+        <div class="flex items-center justify-between gap-3 text-sm">
+          <p id="progressMessage" class="text-indigo-700 font-medium truncate">Đang chuẩn bị…</p>
+          <span id="progressPct" class="shrink-0 text-indigo-700 font-bold tabular-nums">0%</span>
+        </div>
+        <div class="mt-2 h-2.5 bg-slate-200 rounded-full overflow-hidden">
+          <div id="progressBar" class="h-full bg-gradient-to-r from-indigo-500 to-violet-500 rounded-full transition-all duration-700 ease-out" style="width: 0%"></div>
+        </div>
+        <p id="progressHint" class="mt-1.5 text-center text-xs text-slate-400"></p>
+      </div>
 
       <!-- Báo lỗi -->
       <div id="errorBox" class="hidden mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -134,10 +156,15 @@
       fileName: document.getElementById('fileName'),
       fileMeta: document.getElementById('fileMeta'),
       removeFileBtn: document.getElementById('removeFileBtn'),
+      instructions: document.getElementById('instructions'),
       processBtn: document.getElementById('processBtn'),
       btnSpinner: document.getElementById('btnSpinner'),
       btnLabel: document.getElementById('btnLabel'),
-      statusText: document.getElementById('statusText'),
+      progressBox: document.getElementById('progressBox'),
+      progressBar: document.getElementById('progressBar'),
+      progressPct: document.getElementById('progressPct'),
+      progressMessage: document.getElementById('progressMessage'),
+      progressHint: document.getElementById('progressHint'),
       errorBox: document.getElementById('errorBox'),
       errorMsg: document.getElementById('errorMsg'),
       resultSection: document.getElementById('resultSection'),
@@ -160,12 +187,17 @@
     let loading = false;
     let elapsedTimerId = null;
     let currentTab = 'text'; // tab đang active: 'text' | 'json'
-    let lastResponse = null; // JSON đầy đủ của lần xử lý gần nhất
 
     const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // khớp mặc định MAX_FILE_SIZE_BYTES của server
-    const CLIENT_TIMEOUT_MS = 6 * 60 * 1000;      // client tự hủy request sau 6 phút
+    const POLL_INTERVAL_MS = 1500;               // chu kỳ poll tiến trình job
+    const MAX_POLL_FAILURES = 3;                  // số lần poll lỗi liên tiếp trước khi bỏ cuộc
+    const JOB_STORAGE_KEY = 'browserUseJobId';    // jobId để nối lại job sau khi refresh trang
 
     /* ==================== TIỆN ÍCH ==================== */
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
     function formatBytes(bytes) {
       if (!Number.isFinite(bytes)) return '—';
       const units = ['B', 'KB', 'MB', 'GB'];
@@ -184,6 +216,10 @@
       els.errorMsg.textContent = message;
       els.errorBox.classList.remove('hidden');
       els.resultSection.classList.add('hidden');
+    }
+
+    function clearSavedJob() {
+      try { localStorage.removeItem(JOB_STORAGE_KEY); } catch { /* Safari private mode */ }
     }
 
     function setFile(file) {
@@ -221,22 +257,19 @@
       updateProcessButton();
       els.btnSpinner.classList.remove('hidden');
       els.dropzone.classList.add('pointer-events-none', 'opacity-60');
-      els.statusText.classList.remove('hidden');
+      els.instructions.classList.add('opacity-60');
+      els.progressBox.classList.remove('hidden');
+      els.progressBar.style.width = '0%';
+      els.progressPct.textContent = '0%';
+      els.progressMessage.textContent = 'Đang chuẩn bị…';
+      els.progressHint.textContent = '';
       els.resultSection.classList.add('hidden');
       hideError();
 
       const startedAt = Date.now();
-      els.statusText.textContent = 'Đang chuẩn bị gửi file…';
       elapsedTimerId = setInterval(() => {
         const seconds = Math.round((Date.now() - startedAt) / 1000);
         els.btnLabel.textContent = `Đang xử lý · ${seconds}s`;
-        if (seconds < 5) {
-          els.statusText.textContent = 'Đang tải file lên Browser Use Cloud…';
-        } else if (seconds < 20) {
-          els.statusText.textContent = 'Đang tải file lên Browser Use Cloud… (tùy dung lượng file)';
-        } else {
-          els.statusText.textContent = 'Agent đang phân tích file trên Browser Use Cloud — có thể mất từ 1 đến 5 phút…';
-        }
       }, 250);
       els.btnLabel.textContent = 'Đang xử lý · 0s';
     }
@@ -246,17 +279,73 @@
       updateProcessButton();
       els.btnSpinner.classList.add('hidden');
       els.btnLabel.textContent = 'Xử lý';
-      els.statusText.classList.add('hidden');
       els.dropzone.classList.remove('pointer-events-none', 'opacity-60');
+      els.instructions.classList.remove('opacity-60');
       if (elapsedTimerId) {
         clearInterval(elapsedTimerId);
         elapsedTimerId = null;
       }
     }
 
+    /* ==================== TIẾN TRÌNH ==================== */
+    function updateProgressUI(state) {
+      const pct = Math.max(0, Math.min(100, state.progress || 0));
+      els.progressBar.style.width = `${pct}%`;
+      els.progressPct.textContent = `${pct}%`;
+      if (state.message) els.progressMessage.textContent = state.message;
+
+      const bits = [];
+      if (state.stepCount) bits.push(`${state.stepCount} bước`);
+      if (state.elapsedMs != null) bits.push(`${(state.elapsedMs / 1000).toFixed(1)}s`);
+      if (state.phase === 'queued') bits.push('trong hàng đợi');
+      if (state.phase === 'running') bits.push('agent đang chạy');
+      if (state.phase === 'uploading') bits.push('đang tải file');
+      els.progressHint.textContent = bits.join(' · ');
+    }
+
+    /**
+     * Poll GET /api/jobs/{jobId} tới khi job xong.
+     * - completed → trả về response cuối (dùng cho renderResult)
+     * - failed → throw Error với thông điệp từ server
+     * - 404 → job mất (server restart / hết hạn) → throw
+     */
+    async function pollJob(jobId) {
+      let pollFailures = 0;
+      while (true) {
+        await sleep(POLL_INTERVAL_MS);
+        let state;
+        try {
+          const res = await fetch(`/api/jobs/${jobId}`);
+          if (res.status === 404) {
+            throw { gone: true };
+          }
+          state = await res.json().catch(() => ({}));
+          pollFailures = 0;
+        } catch (err) {
+          if (err && err.gone) {
+            throw new Error('Job không còn tồn tại (server có thể đã khởi động lại hoặc job hết hạn).');
+          }
+          if (++pollFailures >= MAX_POLL_FAILURES) {
+            throw new Error('Mất kết nối tới server khi theo dõi tiến trình. Kiểm tra mạng rồi tải lại trang.');
+          }
+          continue;
+        }
+
+        updateProgressUI(state);
+
+        if (state.status === 'completed') {
+          clearSavedJob();
+          return state;
+        }
+        if (state.status === 'failed') {
+          clearSavedJob();
+          throw new Error(state.error || 'Xử lý thất bại.');
+        }
+      }
+    }
+
     /* ==================== HIỂN THỊ KẾT QUẢ ==================== */
     function renderResult(data) {
-      lastResponse = data;
       els.resultText.textContent = data.result && data.result.text ? data.result.text : '(Không có nội dung)';
       els.resultJson.textContent = JSON.stringify(data, null, 2);
 
@@ -268,6 +357,7 @@
       els.chipCost.classList.toggle('hidden', data.result.costUsd == null);
       els.chipTime.textContent = data.elapsedMs != null ? `Thời gian: ${(data.elapsedMs / 1000).toFixed(1)}s` : '';
 
+      els.progressBox.classList.add('hidden');
       els.errorBox.classList.add('hidden');
       els.resultSection.classList.remove('hidden');
       switchTab('text');
@@ -296,32 +386,43 @@
       if (!selectedFile || loading) return;
 
       startLoading();
-      const controller = new AbortController();
-      const abortTimerId = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
-
       try {
         const formData = new FormData();
         formData.append('file', selectedFile);
+        const instructions = els.instructions.value.trim();
+        if (instructions) formData.append('instructions', instructions);
 
-        const res = await fetch('/api/process', {
-          method: 'POST',
-          body: formData,
-          signal: controller.signal,
-        });
-
+        const res = await fetch('/api/process', { method: 'POST', body: formData });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.success !== true) {
+        if (!res.ok || data.success !== true || !data.jobId) {
           throw new Error(data.error || `Lỗi HTTP ${res.status} từ server.`);
         }
-        renderResult(data);
+
+        try { localStorage.setItem(JOB_STORAGE_KEY, data.jobId); } catch { /* ignore */ }
+
+        const final = await pollJob(data.jobId);
+        renderResult(final);
       } catch (err) {
-        if (err.name === 'AbortError') {
-          showError('Hết thời gian chờ phía trình duyệt (6 phút). Thu nhỏ task hoặc thử lại với file nhỏ hơn.');
-        } else {
-          showError(err.message || 'Lỗi không xác định khi gọi API.');
-        }
+        showError(err.message || 'Lỗi không xác định khi gọi API.');
       } finally {
-        clearTimeout(abortTimerId);
+        stopLoading();
+      }
+    }
+
+    /** Nối lại job đang chạy sau khi refresh trang (jobId lưu trong localStorage) */
+    async function resumeSavedJob() {
+      let jobId = null;
+      try { jobId = localStorage.getItem(JOB_STORAGE_KEY); } catch { return; }
+      if (!jobId) return;
+
+      startLoading();
+      try {
+        const final = await pollJob(jobId);
+        renderResult(final);
+      } catch (err) {
+        clearSavedJob();
+        showError(err.message || 'Không nối lại được job trước đó.');
+      } finally {
         stopLoading();
       }
     }
@@ -375,8 +476,9 @@
       setTimeout(() => { els.copyBtn.textContent = 'Copy'; }, 1500);
     });
 
-    // Kiểm tra server sống khi mở trang
+    // Kiểm tra server sống + nối lại job đang chạy (nếu có) khi mở trang
     fetch('/api/health').catch(() => {});
+    resumeSavedJob();
   </script>
 </body>
 </html>

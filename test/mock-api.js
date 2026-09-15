@@ -83,9 +83,29 @@ app.post('/runs', (req, res) => {
     status: 'queued',
     workspaceId: req.body.workspaceId,
     uploadedBytes: lastUploadedBytes.length,
+    events: [],
     createdAt: new Date().toISOString(),
   };
   runs.set(runId, run);
+
+  // Mô phỏng agent phát event trong lúc chạy (như Run Events thật của V4)
+  const schedule = [
+    { delay: 300, type: 'run_started', data: { message: 'Bắt đầu xử lý yêu cầu' } },
+    { delay: 1200, type: 'agent_step', data: { message: 'Đọc và phân tích nội dung file' } },
+    { delay: 2200, type: 'agent_step', data: { message: 'Đang xử lý dữ liệu theo yêu cầu' } },
+    { delay: 3200, type: 'model_call', data: { message: 'Đang tổng hợp kết quả' } },
+  ];
+  for (const s of schedule) {
+    setTimeout(() => {
+      run.events.push({
+        runId,
+        id: run.events.length + 1,
+        ts: new Date().toISOString(),
+        type: s.type,
+        data: s.data,
+      });
+    }, s.delay);
+  }
 
   setTimeout(() => {
     run.status = 'completed';
@@ -103,6 +123,19 @@ app.get('/runs/:id/status', (req, res) => {
   const run = runs.get(req.params.id);
   if (!run) return res.status(404).json({ detail: 'Run not found' });
   res.json({ status: run.status });
+});
+
+// Giống Run Events v4: đọc delta theo cursor `after`, có hasMore/nextAfter
+app.get('/runs/:id/events', (req, res) => {
+  const run = runs.get(req.params.id);
+  if (!run) return res.status(404).json({ detail: 'Run not found' });
+  const after = Number(req.query.after || 0);
+  const events = run.events.filter((e) => e.id > after);
+  res.json({
+    events,
+    nextAfter: events.length ? events[events.length - 1].id : null,
+    hasMore: false,
+  });
 });
 
 app.get('/runs/:id', (req, res) => {

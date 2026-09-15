@@ -10,6 +10,44 @@
 
 ---
 
+## [1.1.0] - 2026-09-15
+
+### Added — Yêu cầu tuỳ chỉnh + % tiến trình (lượt làm việc thứ 2)
+
+- **Ô "Yêu cầu xử lý" (`instructions`)** — `public/index.html` + `server.js`:
+  - Textarea tuỳ chọn (≤5000 ký tự) ngay dưới dropzone: người dùng viết yêu cầu riêng — viết code, xử lý dữ liệu, chuyển đổi file… Để trống → giữ prompt phân tích tổng quát mặc định của v1.0.0.
+  - `buildTaskPrompt(fileName, instructions)`: khi có instructions, nhúng nguyên văn yêu cầu vào `task` kèm chỉ dẫn "viết code thì trình bày đầy đủ trong khối markdown".
+- **Hiển thị % tiến trình** — `server.js` + `public/index.html`:
+  - Server poll `GET /runs/{id}/events?after=<cursor>` (endpoint Run Events của API v4, drain `hasMore` theo khuyến nghị docs) mỗi chu kỳ cùng `GET /runs/{id}/status`; đếm số event `n` và tính `% = min(95, 22 + 73·n/(n+8))` → 100% khi terminal. % và message ("Agent: …") đều lấy từ hoạt động **thật** của run, không fake theo thời gian.
+  - UI: progress bar gradient + số % + message + hint (số bước · elapsed · phase), cập nhật mỗi 1.5s.
+- **`GET /api/jobs/{jobId}`** — endpoint mới cho UI poll: trả `phase/progress/message/stepCount/elapsedMs` khi đang chạy; khi xong trả response đầy đủ như v1.0.0; khi lỗi trả `{ success:false, error, details }` với HTTP code gốc; 404 khi job hết hạn (TTL 30 phút).
+- **Nối lại job sau refresh**: UI lưu `jobId` trong `localStorage`, mở lại trang tự poll tiếp job đang chạy.
+- **`test/mock-api.js`**: thêm `GET /runs/:id/events` (cursor `after` + `hasMore`) và phát 4 event mô phỏng trong 4 giây chạy.
+
+### Changed
+
+- **[BREAKING] `POST /api/process` chuyển sang mô hình job-based**: trả `202 { jobId }` ngay lập tức thay vì giữ request tới khi xong (v1.0.0). Lý do: (1) hiển thị % tiến trình đòi hỏi server đẩy cập nhật trong lúc run đang chạy; (2) request dài bị proxy Cloudflare chặn 100s (lỗi 524) — poll ngắn qua job không bị giới hạn này; (3) refresh trang không mất job. Lỗi validate đầu vào (thiếu file/key, file quá lớn) vẫn trả đồng bộ như cũ.
+- `server.js`: tách logic xử lý ra `processJob()` chạy nền, job store `Map` trong RAM + TTL dọn dẹp 30 phút; `waitForRunCompletion` nâng cấp thêm đọc events và cập nhật `job.progress/message/phase`.
+- `README.md`: luồng API mới (2 bước create + poll), ví dụ curl cập nhật, bỏ cảnh báo 524 (không còn áp dụng).
+- `REQUIREMENTS.md`: bump 1.1.0 — thêm FR-7/8/9, luồng job-based, bảng API mới, cập nhật nghiệm thu & phạm vi.
+
+### Quyết định kỹ thuật
+
+1. **Công thức % tiệm cận** `22 + 73·n/(n+8)` (cap 95%): % tăng theo event thật nhưng không bao giờ "nhìn lố" 100% trước khi run terminal — tránh lời hứa sai thời điểm.
+2. **Poll theo khuyến nghị docs v4**: đọc `status` TRƯỚC `events` mỗi chu kỳ (bắt trọn event cuối sau terminal), drain hết `hasMore`, tôn trọng 429 `Retry-After`, `include_output=false` cho nhẹ.
+3. **Không dùng SSE/WebSocket**: poll `GET /api/jobs/{id}` 1.5s đủ mượt, đơn giản, hoạt động qua mọi proxy/tunnel.
+4. `summarizeEvent()` phòng thủ: thử các field `message/text/summary/...` trong `data`, fallback về tên type — vì event `data` là free-form theo schema v4.
+
+### Verified
+
+- ✅ Mock E2E: create job (202) → poll thấy `progress` tăng 30% → 37% → 42% kèm message "Agent: Đang xử lý dữ liệu theo yêu cầu" → completed 100% với kết quả đủ shape như v1.0.0.
+- ✅ Mock E2E với `instructions`: task gửi cho run chứa nguyên văn yêu cầu người dùng; agent (mock) phản hồi theo đúng yêu cầu.
+- ✅ Nhánh lỗi giữ nguyên: 400 (thiếu file), 413 (file quá lớn), 500 (thiếu key) trả đồng bộ; key sai → job failed với message "Kiểm tra lại BROWSER_USE_API_KEY".
+- ✅ Test thật với Browser Use Cloud API v4 (2026-09-15): events thật trả về qua endpoint `/runs/{id}/events`, % cập nhật mượt, hoàn thành 49–55s với yêu cầu viết code Python từ file CSV.
+- ✅ Nối lại job sau refresh hoạt động qua localStorage.
+
+---
+
 ## [1.0.0] - 2026-09-15
 
 ### Added — Khởi tạo toàn bộ dự án (lượt làm việc đầu tiên)
