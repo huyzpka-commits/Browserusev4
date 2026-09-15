@@ -1,0 +1,46 @@
+# CHANGELOG.md
+
+> **Mục đích:** Ghi lại **toàn bộ thay đổi sau mỗi lượt trả lời/làm việc** để AI và developer luôn biết dự án đang ở đâu, tránh bị "đi lạc hướng".
+>
+> **Nguyên tắc:**
+> 1. Mỗi lần thay đổi → thêm 1 mục mới **lên đầu** file này, theo dạng `## [phiên bản] - [ngày]`.
+> 2. Ghi rõ: file nào bị sửa, sửa gì, vì sao.
+> 3. Thay đổi nào làm sai khác `REQUIREMENTS.md` → phải cập nhật cả `REQUIREMENTS.md`.
+> 4. Không xóa các mục cũ.
+
+---
+
+## [1.0.0] - 2026-09-15
+
+### Added — Khởi tạo toàn bộ dự án (lượt làm việc đầu tiên)
+
+- **`package.json`**: khai báo dự án `browser-use-file-analyzer` v1.0.0, scripts `start` / `dev` / `mock`, dependencies `express`, `cors`, `multer`, `dotenv`, `axios`, yêu cầu Node ≥ 18.
+- **`server.js`** (backend chính):
+  - `POST /api/process`: nhận file upload (multer, memoryStorage — không ghi đĩa) → tạo Workspace → xin presigned URL → PUT bytes file → tạo Run (`task` + `workspaceId` + `attachedFileIds`) → poll `GET /runs/{id}/status` (2s, tôn trọng 429 Retry-After, bỏ cuộc sau 3 lần lỗi liên tiếp) → lấy RunSummary → trả JSON kết quả về UI.
+  - `GET /api/health`: health check (uptime, trạng thái API key, giới hạn file).
+  - Global error handler chuẩn hóa: lỗi multer (413/400), lỗi upstream Browser Use (401/402/404/409/422/429/5xx → 502/402/429…), timeout (504), lỗi mạng (502); mọi thông báo bằng tiếng Việt.
+  - Dọn dẹp: archive Workspace sau khi run xong (giữ lại nếu client timeout mà run vẫn đang chạy).
+  - CORS qua middleware `cors`, origin cấu hình `CORS_ORIGIN`.
+- **`public/index.html`** (frontend):
+  - TailwindCSS (CDN), UI tiếng Việt: dropzone kéo-thả/chọn file, chip thông tin file, nút **Xử lý**, loading state (spinner + đếm giây + disable), hộp báo lỗi, vùng kết quả 2 tab **Kết quả / JSON** + chip meta (status, model, tokens, cost, thời gian) + nút Copy.
+  - Gọi `POST /api/process` bằng `fetch`, tự hủy sau 6 phút (AbortController), render kết quả text + JSON raw.
+- **`test/mock-api.js`**: mock Browser Use API v4 (workspaces, presigned upload, runs, status, summary, delete) để test end-to-end offline — `npm run mock`.
+- **`REQUIREMENTS.md`**: chốt toàn bộ yêu cầu app (mục tiêu, công nghệ, luồng, FR/NFR, biến môi trường, tiêu chí nghiệm thu, phạm vi KHÔNG làm).
+- **`README.md`**: hướng dẫn cài đặt, cấu hình `.env`, chạy local, test với mock, chạy public bằng tunnel (cloudflared/ngrok/localtunnel) + deploy, tài liệu API, xử lý lỗi.
+- **`.env.example`**, **`.gitignore`**.
+
+### Quyết định kỹ thuật (đặc biệt, kèm lý do)
+
+1. **Dùng Browser Use Cloud API v4** (đối chiếu docs chính thức 2026-09): auth header `X-Browser-Use-API-Key` (không dùng Bearer), base URL `https://api.browser-use.com/api/v4`.
+2. **Gửi file thật cho agent qua Workspace** (tạo workspace → presigned PUT → `attachedFileIds`) thay vì nhúng nội dung text vào prompt — hỗ trợ mọi định dạng file (PDF, ảnh…) và file lớn tới 50MB.
+3. **Gọi REST trực tiếp bằng axios, không dùng SDK** — giảm phụ thuộc, chạy được mọi host chỉ cần Node.
+4. **Request đồng bộ** (chờ run xong rồi trả 1 response) — đúng luồng yêu cầu "Khởi tạo request → Đợi kết quả → Trả về UI".
+5. **Poll bằng endpoint nhẹ** `GET /runs/{id}/status` (chỉ lấy field `status`) thay vì `GET /runs/{id` — tiết kiệm rate limit theo khuyến nghị docs.
+
+### Verified
+
+- ✅ Test end-to-end với mock API: upload file → run → poll → kết quả JSON/text trả về đúng shape.
+- ✅ Test lỗi: thiếu file (400), thiếu API key (500), file quá lớn (413), API key sai (401 → 502 tiếng Việt).
+- ✅ **Test thật với Browser Use Cloud API (v4, 2026-09-15)**: upload `sample.csv` (504 bytes) → agent đọc file, trả về phân tích tiếng Việt có bảng số liệu, hoàn thành 49s, tốn $0.0099, UTF-8 chuẩn.
+- ✅ Server khởi động OK trên Node v24, cổng 3000.
+- ✅ Chạy public qua Cloudflare quick tunnel (cloudflared): UI + /api/health truy cập được từ internet.
