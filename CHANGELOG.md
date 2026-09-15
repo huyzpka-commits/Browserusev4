@@ -37,6 +37,11 @@
 4. **Request đồng bộ** (chờ run xong rồi trả 1 response) — đúng luồng yêu cầu "Khởi tạo request → Đợi kết quả → Trả về UI".
 5. **Poll bằng endpoint nhẹ** `GET /runs/{id}/status` (chỉ lấy field `status`) thay vì `GET /runs/{id` — tiết kiệm rate limit theo khuyến nghị docs.
 
+### Published
+
+- Mã nguồn đã đẩy lên GitHub: **https://github.com/huyzpka-commits/Browserusev4** (nhánh `main`, commit `96c811c`).
+- `BrowserUse-WebApp.zip` KHÔNG đưa vào repo (nằm trong `.gitignore` — file nén là artifact build, tải trực tiếp từ máy).
+
 ### Verified
 
 - ✅ Test end-to-end với mock API: upload file → run → poll → kết quả JSON/text trả về đúng shape.
