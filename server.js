@@ -48,6 +48,9 @@ const config = {
   // Giới hạn giải nén ZIP (chống zip bomb)
   maxZipFiles: Number(process.env.MAX_ZIP_FILES || 50),
   maxZipTotalExtractBytes: Number(process.env.MAX_ZIP_TOTAL_EXTRACT_BYTES || 100 * 1024 * 1024),
+  // Lô upload tối đa file/request (v1.3.0). API v4 hiện giới hạn maxItems=10/request —
+  // nếu bị từ chối (422) server TỰ CHIA ĐÔI lô và thử lại, nên đặt 20 vẫn an toàn.
+  uploadBatchSize: Math.max(1, Number(process.env.UPLOAD_BATCH_SIZE || 20)),
   // Thư mục lưu kết quả để tải về + thời gian giữ file trước khi tự xoá
   outputDir: process.env.OUTPUT_DIR ? path.resolve(process.env.OUTPUT_DIR) : path.join(__dirname, 'outputs'),
   outputFileTtlMs: Number(process.env.OUTPUT_FILE_TTL_MS || 24 * 60 * 60 * 1000),
@@ -437,6 +440,40 @@ async function waitForRunCompletion(job, runId) {
   throw timeoutError;
 }
 
+/**
+ * Đăng ký 1 lô file để lấy presigned upload URL (lô ≤ UPLOAD_BATCH_SIZE = 20/request).
+ * Nếu API từ chối vì lô quá lớn (HTTP 422 — API v4 hiện ghi maxItems=10/request),
+ * TỰ CHIA ĐÔI lô và đăng ký lại từng nửa — không mất file, không cần cấu hình lại.
+ */
+async function registerUploadBatch(workspaceId, files) {
+  try {
+    const { data } = await buApi.post(`/workspaces/${workspaceId}/files/upload`, {
+      files: files.map((f) => ({
+        name: f.name,
+        contentType: f.contentType || 'application/octet-stream',
+        size: f.size,
+      })),
+    });
+    const items = data.files || [];
+    if (items.length !== files.length) {
+      throw new ApiError(502, 'Browser Use trả về số presigned URL không khớp số file đăng ký.');
+    }
+    return items;
+  } catch (err) {
+    const batchTooLarge = err.response && err.response.status === 422 && files.length > 1;
+    if (batchTooLarge) {
+      console.warn(
+        `[WARN] API từ chối lô ${files.length} file/request — tự chia đôi thành ${Math.ceil(files.length / 2)} + ${Math.floor(files.length / 2)} và thử lại.`
+      );
+      const half = Math.ceil(files.length / 2);
+      const left = await registerUploadBatch(workspaceId, files.slice(0, half));
+      const right = await registerUploadBatch(workspaceId, files.slice(half));
+      return [...left, ...right];
+    }
+    throw err;
+  }
+}
+
 /* ============================== JOB STORE ============================== */
 
 const jobs = new Map();
@@ -507,26 +544,17 @@ async function processJob(job, uploadedFile, instructions) {
     if (!job.workspaceId) throw new ApiError(502, 'Browser Use không trả về workspace id.');
     job.progress = 8;
 
-    // --- Bước 2+3: Upload từng file (lô tối đa 10 file/request theo API v4) ---
+    // --- Bước 2+3: Upload từng file theo lô (≤ UPLOAD_BATCH_SIZE = 20/request,
+    // API từ chối lô quá lớn thì registerUploadBatch tự chia đôi và thử lại) ---
     const uploadIds = [];
-    const BATCH = 10;
+    const BATCH = config.uploadBatchSize;
     for (let i = 0; i < workspaceFiles.length; i += BATCH) {
       const batch = workspaceFiles.slice(i, i + BATCH);
 
       job.message = `Đăng ký upload file ${i + 1}–${i + batch.length}/${workspaceFiles.length}…`;
-      const uploadRes = await withStep('Đăng ký upload file', () =>
-        buApi.post(`/workspaces/${job.workspaceId}/files/upload`, {
-          files: batch.map((f) => ({
-            name: f.name,
-            contentType: f.contentType || 'application/octet-stream',
-            size: f.size,
-          })),
-        })
+      const items = await withStep('Đăng ký upload file', () =>
+        registerUploadBatch(job.workspaceId, batch)
       );
-      const items = uploadRes.data.files || [];
-      if (items.length !== batch.length) {
-        throw new ApiError(502, 'Browser Use trả về số presigned URL không khớp số file đăng ký.');
-      }
 
       for (let idx = 0; idx < batch.length; idx++) {
         const f = batch[idx];

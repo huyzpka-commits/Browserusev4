@@ -28,6 +28,8 @@ const runs = new Map();
 // Bytes/số file đã PUT kể từ lần tạo run gần nhất (reset sau mỗi run)
 let bytesSinceLastRun = 0;
 let filesSinceLastRun = 0;
+// Kích thước các lô upload đã nhận kể từ lần tạo run gần nhất (để kiểm chứng cơ chế chia lô)
+let batchesSinceLastRun = [];
 
 function uuid() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -55,7 +57,21 @@ app.post('/workspaces', (req, res) => {
 app.post('/workspaces/:id/files/upload', (req, res) => {
   const ws = workspaces.get(req.params.id);
   if (!ws) return res.status(404).json({ detail: 'Workspace not found' });
-  const items = (req.body.files || []).map((f) => ({
+  const files = req.body.files || [];
+  batchesSinceLastRun.push(files.length);
+  // Ép đúng giới hạn maxItems=10 của API thật (FastAPI trả 422 kiểu too_long)
+  if (files.length > 10) {
+    return res.status(422).json({
+      detail: [
+        {
+          loc: ['body', 'files'],
+          msg: `List should have at most 10 items after validation, not ${files.length}`,
+          type: 'too_long',
+        },
+      ],
+    });
+  }
+  const items = files.map((f) => ({
     id: uuid(),
     name: f.name,
     storedName: f.name,
@@ -87,6 +103,7 @@ app.post('/runs', (req, res) => {
     workspaceId: req.body.workspaceId,
     uploadedBytes: bytesSinceLastRun,
     uploadedFiles: filesSinceLastRun,
+    uploadBatches: batchesSinceLastRun.slice(),
     events: [],
     createdAt: new Date().toISOString(),
   };
@@ -94,6 +111,7 @@ app.post('/runs', (req, res) => {
   // Reset cho run kế tiếp: các PUT sau đây thuộc về run mới
   bytesSinceLastRun = 0;
   filesSinceLastRun = 0;
+  batchesSinceLastRun = [];
 
   // Mô phỏng agent phát event trong lúc chạy (như Run Events thật của V4)
   const schedule = [
@@ -119,6 +137,7 @@ app.post('/runs', (req, res) => {
     run.result =
       `[MOCK] Agent đã phân tích xong các file của bạn.\n` +
       `- Đã nhận ${run.uploadedFiles} file, tổng ${run.uploadedBytes} bytes\n` +
+      `- Các lô upload đã nhận: [${run.uploadBatches.join(', ')}]\n` +
       `- Task: ${run.task.slice(0, 80)}…\n` +
       `- Thời gian mô phỏng: ${TERMINAL_DELAY_MS / 1000}s`;
   }, TERMINAL_DELAY_MS);

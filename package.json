@@ -1,6 +1,6 @@
 {
   "name": "browser-use-file-analyzer",
-  "version": "1.2.1",
+  "version": "1.4.1",
   "description": "Web app upload file, gui Browser Use Cloud API (v4) de AI agent phan tich va hien thi ket qua",
   "main": "server.js",
   "scripts": {

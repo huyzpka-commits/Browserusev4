@@ -1,7 +1,7 @@
 # REQUIREMENTS.md — Yêu cầu ứng dụng
 
 **Tên app:** Browser Use File Analyzer
-**Phiên bản yêu cầu:** 1.2.1 · **Cập nhật:** 2026-09-16
+**Phiên bản yêu cầu:** 1.4.0 · **Cập nhật:** 2026-09-16
 
 > File này là **nguồn chân lý (source of truth)** cho mọi yêu cầu của app.
 > Mọi thay đổi trong các lượt làm việc sau **phải** được ghi vào `CHANGELOG.md` và nếu làm thay đổi hành vi thì cập nhật lại file này.
@@ -22,9 +22,9 @@ Xây dựng một web app **chạy công khai trên internet**, cho phép ngư�
 | Thành phần | Công nghệ |
 |---|---|
 | Backend | Node.js (≥ 18) + Express |
-| Frontend | HTML + JavaScript thuần + TailwindCSS (CDN) |
+| Frontend | HTML + JavaScript thuần + **Neon Terminal UI Kit** (CSS thuần + vanilla JS, tiền tố class `.nt-*`) |
 | API ngoài | Browser Use Cloud API **v4** (`https://api.browser-use.com/api/v4`), auth bằng header `X-Browser-Use-API-Key` |
-| Thư viện | `express`, `cors`, `multer`, `dotenv`, `axios` |
+| Thư viện | `express`, `cors`, `multer`, `dotenv`, `axios`, `adm-zip` |
 
 ## 3. Luồng xử lý (bắt buộc) — mô hình JOB-BASED từ v1.1.0
 
@@ -61,8 +61,9 @@ Xây dựng một web app **chạy công khai trên internet**, cho phép ngư�
 | FR-7 | **Ô "Yêu cầu xử lý"** (textarea, tuỳ chọn, tối đa 5000 ký tự): người dùng viết yêu cầu riêng (viết code, xử lý dữ liệu…); để trống → prompt phân tích tổng quát mặc định. Yêu cầu được nhúng nguyên văn vào `task` gửi cho agent |
 | FR-8 | **Hiển thị % tiến trình**: progress bar + số % + thông điệp hoạt động gần nhất của agent + số bước/elapsed, cập nhật qua `GET /api/jobs/{jobId}` (UI poll 1.5s/lần). % tính từ event thật của run, chỉ đạt 100% khi run terminal |
 | FR-9 | **Nối lại job sau refresh**: UI lưu `jobId` trong `localStorage`, mở lại trang sẽ tiếp tục poll job đang chạy |
-| FR-10 | **Xử lý file .zip**: server giải nén trong RAM (adm-zip) rồi upload từng file vào workspace (lô ≤10 file/request theo API v4, đính kèm `attachedFileIds` ≤20). Bảo vệ: bỏ đường dẫn (chống path traversal), tự đổi tên trùng, bỏ `__MACOSX`/`.DS_Store`/file rỗng, giới hạn `MAX_ZIP_FILES` (50) và `MAX_ZIP_TOTAL_EXTRACT_BYTES` (100MB), chặn entry khai báo size vượt giới hạn trước khi giải nén (chống zip bomb). Prompt liệt kê danh sách file đã giải nén; UI hiển thị chip "ZIP → N file đã giải nén" |
+| FR-10 | **Xử lý file .zip**: server giải nén trong RAM (adm-zip) rồi upload từng file vào workspace theo **lô ≤ `UPLOAD_BATCH_SIZE` (20)/request**; nếu API từ chối lô quá lớn (422 — API v4 hiện ghi `maxItems: 10`) thì **tự chia đôi lô và thử lại** (đính kèm `attachedFileIds` ≤20). Bảo vệ: bỏ đường dẫn (chống path traversal), tự đổi tên trùng, bỏ `__MACOSX`/`.DS_Store`/file rỗng, giới hạn `MAX_ZIP_FILES` (50) và `MAX_ZIP_TOTAL_EXTRACT_BYTES` (100MB), chặn entry khai báo size vượt giới hạn trước khi giải nén (chống zip bomb). Prompt liệt kê danh sách file đã giải nén; UI hiển thị chip "ZIP → N file đã giải nén" |
 | FR-11 | **Link tải kết quả trên web sau khi hoàn thành**: server ghi `outputs/<jobId>.txt` (kết quả có header metadata) và `outputs/<jobId>.json` (response đầy đủ) khi job completed; UI hiển thị 2 nút **"Tải .txt" / "Tải .json"** trỏ tới `GET /api/jobs/{jobId}/download?type=txt\|json`. File sống sót sau khi job hết hạn trong RAM; tự xoá sau `OUTPUT_FILE_TTL_MS` (24h); chỉ đụng file `<uuid>.txt/.json` khi dọn dẹp |
+| FR-12 | **Giao diện terminal/matrix (v1.4.0)**: toàn bộ UI chuyển sang style "hacker terminal" theo UI kit mẫu trong folder `toàn bộ giao diện ui` — dùng nguyên 2 file kit `public/neon-terminal-ui.css` + `public/neon-matrix-bg.js` (tiền tố `.nt-*`, **bỏ TailwindCDN**). Yếu tố bắt buộc: nền mưa ký tự matrix **phủ full màn hình** (canvas `#nt-matrix` bắt buộc có `width/height: 100%` — v1.4.1 fix bug replaced-element khiến canvas sót 300×150px ở góc trái), scanlines, tiêu đề glitch neon, panel viền xanh có vệt sáng chạy, spinner ASCII `[\|/-]` trên nút, **vòng progress ring SVG** hiển thị % giữa vòng + thanh bar mảnh, chips `nt-badge`, tabs `[ KẾT_QUẢ ]` `[ JSON ]`, alert `[!] ERR ::`. Mọi chức năng cũ (upload, instructions, progress %, kết quả, download, resume job) giữ nguyên |
 
 ## 5. Yêu cầu phi chức năng
 
@@ -101,6 +102,7 @@ Xây dựng một web app **chạy công khai trên internet**, cho phép ngư�
 | `MAX_FILE_SIZE_BYTES` | `10485760` | Giới hạn dung lượng file upload (zip tính theo dung lượng nén) |
 | `MAX_ZIP_FILES` | `50` | Giới hạn số file sau giải nén |
 | `MAX_ZIP_TOTAL_EXTRACT_BYTES` | `104857600` | Giới hạn tổng dung lượng sau giải nén (100MB) |
+| `UPLOAD_BATCH_SIZE` | `20` | Lô upload tối đa file/request — bị 422 thì tự chia đôi, thử lại |
 | `OUTPUT_DIR` | `outputs/` | Thư mục lưu file kết quả để tải về |
 | `OUTPUT_FILE_TTL_MS` | `86400000` | Thời gian giữ file kết quả trước khi tự xoá (24h) |
 
@@ -110,6 +112,7 @@ Xây dựng một web app **chạy công khai trên internet**, cho phép ngư�
 - [x] **% tiến trình tăng dần theo event thật của agent** (progress bar + message "Agent: …"), đạt 100% khi xong
 - [x] **Viết yêu cầu trong ô "Yêu cầu xử lý" → agent thực hiện đúng yêu cầu** (đã test: yêu cầu viết code/tính toán trên file)
 - [x] Refresh trang giữa chừng → UI nối lại job đang chạy qua jobId trong localStorage
+- [x] **Giao diện terminal/matrix hiển thị đúng**: nền matrix chạy, scanlines, glitch title, ring % cập nhật theo progress, spinner ASCII, tabs/badges/alert đúng style `.nt-*`; không còn phụ thuộc Tailwind CDN (UI chạy offline hoàn toàn)
 - [x] **Sau khi hoàn thành, web hiển thị nút "Tải .txt" / "Tải .json"** — bấm tải file về máy (file `<jobId>.txt/.json` thật trong `outputs/`); link vẫn tải được sau khi job hết hạn trong RAM
 - [x] Download `type` sai → 400; jobId không hợp lệ/không có kết quả → 404 JSON
 - [x] **Upload file .zip → server giải nén, agent nhận được từng file trong workspace** (test mock + test thật với 2 file trong zip); prompt liệt kê đúng danh sách file; UI có chip "ZIP → N file"

@@ -1,13 +1,15 @@
 # Browser Use File Analyzer
 
-Web app upload file → AI agent trên **Browser Use Cloud API (v4)** phân tích → hiển thị kết quả JSON/Text. Chạy được local và **công khai trên internet** qua tunnel hoặc deploy.
+Web app upload file → AI agent trên **Browser Use Cloud API (v4)** phân tích → hiển thị kết quả JSON/Text. **Giao diện terminal/matrix** (Neon Terminal UI Kit — không cần Tailwind). Chạy được local và **công khai trên internet** qua tunnel hoặc deploy.
 
-![Stack](https://img.shields.io/badge/stack-Node.js%20%2B%20Express%20%2B%20TailwindCSS-blue)
+![Stack](https://img.shields.io/badge/stack-Node.js%20%2B%20Express%20%2B%20Neon%20Terminal%20UI-green)
 
 ## Tính năng
 
+- **Giao diện terminal/matrix đậm chất IT**: nền mưa ký tự matrix, scanlines CRT, tiêu đề glitch neon xanh, panel viền có vệt sáng quét, spinner ASCII `[\|/-]`, **vòng ring % tiến trình** kiểu HUD — đổi biến `--nt-*` trong `public/neon-terminal-ui.css` để đổi màu toàn bộ theme
+
 - Kéo-thả / chọn file (tối đa 10MB mặc định, mọi định dạng: CSV, TXT, JSON, PDF, ảnh…)
-- **Hỗ trợ file .zip**: server tự giải nén trong RAM rồi upload từng file vào workspace (tối đa 50 file, 100MB sau giải nén; chống zip bomb) — agent thấy từng file thay vì file nén
+- **Hỗ trợ file .zip**: server tự giải nén trong RAM rồi upload từng file vào workspace theo lô ≤20/request (API đang giới hạn 10/request — bị từ chối thì tự chia đôi lô và thử lại; tối đa 50 file, 100MB sau giải nén; chống zip bomb) — agent thấy từng file thay vì file nén
 - **Ô "Yêu cầu xử lý" tuỳ chọn**: viết yêu cầu riêng cho agent — phân tích, viết code xử lý file, chuyển đổi dữ liệu… (để trống → phân tích tổng quát)
 - File được **upload thật lên Workspace** của Browser Use và đính kèm vào Run (`attachedFileIds`) — agent đọc được nội dung gốc của file
 - **% tiến trình theo thời gian thực**: progress bar + % + thông điệp hoạt động gần nhất của agent ("Agent: …"), tính từ Run Events thật của API v4
@@ -44,7 +46,9 @@ Web app upload file → AI agent trên **Browser Use Cloud API (v4)** phân tíc
 .
 ├── server.js           # Backend Express — toàn bộ luồng gọi Browser Use API
 ├── public/
-│   └── index.html      # Frontend — TailwindCSS + vanilla JS
+│   ├── index.html      # Frontend — terminal/matrix UI (vanilla JS)
+│   ├── neon-terminal-ui.css  # UI kit: theme terminal (biến --nt-*)
+│   └── neon-matrix-bg.js     # UI kit: nền mưa ký tự matrix (canvas)
 ├── test/
 │   └── mock-api.js     # Mock Browser Use API v4 để test offline
 ├── .env.example        # Mẫu biến môi trường

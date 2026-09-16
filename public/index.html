@@ -3,170 +3,249 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Browser Use Cloud — Phân tích &amp; xử lý file</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <title>FILE_ANALYZER@browser-use :: terminal</title>
+  <link rel="stylesheet" href="neon-terminal-ui.css" />
+  <style>
+    /* ==== App-specific extensions (xây trên Neon Terminal UI Kit) ==== */
+    .hidden { display: none !important; }
+
+    .nt-wrap { max-width: 780px; }
+
+    /* Dropzone */
+    .nt-drop {
+      padding: 36px 16px;
+      text-align: center;
+      cursor: pointer;
+      border: 1px dashed var(--nt-line);
+      border-radius: var(--nt-radius-lg);
+      background: rgba(0, 255, 156, 0.02);
+      transition: border-color .15s, box-shadow .15s, background .15s;
+    }
+    .nt-drop:hover, .nt-drop.is-over {
+      border-color: var(--nt-green);
+      background: rgba(0, 255, 156, 0.05);
+      box-shadow: inset 0 0 22px rgba(0, 255, 156, 0.12);
+    }
+    .nt-drop.is-disabled { opacity: .45; pointer-events: none; }
+    .nt-drop .nt-drop-big { margin: 4px 0; font-size: 14px; letter-spacing: 2px; color: var(--nt-text-soft); }
+    .nt-drop .nt-drop-big:first-child { color: var(--nt-green); text-shadow: 0 0 10px rgba(0, 255, 156, 0.6); }
+    .nt-drop .nt-drop-link { color: var(--nt-green); text-shadow: 0 0 8px rgba(0, 255, 156, 0.6); }
+    .nt-drop .nt-drop-hint { margin: 10px 0 0; font-size: 11px; letter-spacing: 1px; color: var(--nt-text-mute); }
+    .nt-hidden-input { display: none; }
+
+    /* File đã chọn */
+    .nt-filechip {
+      display: flex; align-items: center; gap: 12px;
+      margin-top: 12px; padding: 10px 14px;
+      background: var(--nt-bg-field);
+      border: 1px solid var(--nt-line-soft);
+      border-left: 3px solid var(--nt-cyan);
+      border-radius: var(--nt-radius);
+    }
+    .nt-filechip .nt-file-name { color: var(--nt-cyan); text-shadow: 0 0 8px rgba(0, 229, 255, 0.5); font-size: 13px; word-break: break-all; }
+    .nt-filechip .nt-file-meta { color: var(--nt-text-mute); font-size: 11px; margin-top: 2px; }
+    .nt-filechip > div { min-width: 0; flex: 1; }
+    .nt-x {
+      flex: 0 0 auto; margin-left: auto;
+      padding: 4px 12px;
+      background: none; border: 1px solid var(--nt-line-soft);
+      color: var(--nt-text-mute); border-radius: 3px;
+      font-family: var(--nt-mono); font-size: 11px; letter-spacing: 1px; cursor: pointer;
+      transition: color .15s, border-color .15s, box-shadow .15s;
+    }
+    .nt-x:hover { color: var(--nt-danger); border-color: var(--nt-danger); box-shadow: 0 0 10px rgba(255, 43, 94, 0.35); }
+
+    /* Nút Xử lý full-width */
+    .nt-btn-block { width: 100%; justify-content: center; padding: 14px; font-size: 14px; margin-top: 16px; }
+
+    /* Progress ring lớn */
+    .nt-ring-lg { width: 76px; height: 76px; }
+    .nt-ring-lg b { font-size: 15px; }
+
+    .nt-prog-msg { color: var(--nt-text-soft); font-size: 13px; min-height: 18px; word-break: break-word; }
+    .nt-prog-msg::before { content: "> "; color: var(--nt-green); text-shadow: 0 0 6px rgba(0, 255, 156, 0.6); }
+    .nt-hint { margin-top: 8px; font-size: 11px; letter-spacing: 1px; color: var(--nt-text-mute); text-align: center; }
+
+    .nt-progress { height: 6px; margin-top: 12px; background: rgba(0, 255, 156, 0.12); border-radius: 3px; overflow: hidden; }
+    .nt-progress i {
+      display: block; height: 100%; width: 0%;
+      background: linear-gradient(90deg, var(--nt-green-dim), var(--nt-green));
+      box-shadow: 0 0 12px rgba(0, 255, 156, 0.8);
+      transition: width .7s ease-out;
+    }
+
+    /* Lỗi */
+    .nt-alert {
+      margin-top: 14px; padding: 12px 14px;
+      background: rgba(255, 43, 94, 0.06);
+      border: 1px solid rgba(255, 43, 94, 0.5);
+      border-left: 3px solid var(--nt-danger);
+      border-radius: var(--nt-radius);
+      color: var(--nt-danger); font-size: 13px; letter-spacing: 0.5px;
+    }
+    .nt-alert::before { content: "[!] ERR :: "; }
+
+    /* Chips */
+    .nt-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+
+    /* Tabs */
+    .nt-tabs { display: flex; gap: 8px; align-items: center; border-bottom: 1px dashed var(--nt-line-soft); padding-bottom: 10px; }
+    .nt-tab {
+      padding: 7px 16px;
+      background: rgba(0, 255, 156, 0.04);
+      border: 1px solid var(--nt-line-soft);
+      border-radius: var(--nt-radius) var(--nt-radius) 0 0;
+      color: var(--nt-text-mute);
+      font-family: var(--nt-mono); font-size: 12px; letter-spacing: 2px; cursor: pointer;
+      transition: color .15s, box-shadow .15s, border-color .15s;
+    }
+    .nt-tab:hover { color: var(--nt-text-soft); }
+    .nt-tab.is-active {
+      color: var(--nt-green); border-color: var(--nt-green);
+      text-shadow: 0 0 8px rgba(0, 255, 156, 0.7);
+      box-shadow: 0 0 12px rgba(0, 255, 156, 0.25);
+      background: rgba(0, 255, 156, 0.08);
+    }
+    .nt-tab-sm { padding: 5px 14px; font-size: 11px; }
+
+    /* Output box */
+    .nt-out {
+      margin-top: 12px; padding: 16px;
+      background: var(--nt-bg-field);
+      border: 1px solid var(--nt-line-soft);
+      border-radius: var(--nt-radius);
+      max-height: 480px; overflow: auto;
+      font-size: 13px; line-height: 1.7;
+      white-space: pre-wrap; word-break: break-word;
+      color: var(--nt-text-soft);
+    }
+    .nt-out.is-json { color: var(--nt-cyan); text-shadow: 0 0 6px rgba(0, 229, 255, 0.25); font-size: 12px; }
+    .nt-out pre { margin: 0; font-family: inherit; }
+
+    /* Download row */
+    .nt-dl { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; align-items: center; }
+    .nt-dl-label { font-size: 11px; letter-spacing: 2px; color: var(--nt-text-mute); }
+    .nt-dl .nt-btn { padding: 9px 16px; font-size: 12px; }
+
+    @media (max-width: 480px) {
+      .nt-dl .nt-btn { width: 100%; justify-content: center; }
+    }
+  </style>
 </head>
-<body class="bg-slate-100 min-h-screen text-slate-800 antialiased">
-  <div class="max-w-3xl mx-auto px-4 py-10">
+<body class="nt-body">
+  <canvas id="nt-matrix"></canvas>
+  <div class="nt-scanlines"></div>
+
+  <div class="nt-wrap">
 
     <!-- ==================== HEADER ==================== -->
-    <header class="text-center mb-8">
-      <span class="inline-block px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 text-xs font-semibold tracking-wider">
-        BROWSER USE CLOUD API · V4
-      </span>
-      <h1 class="mt-3 text-3xl font-bold text-slate-900">Phân tích &amp; xử lý file với AI Agent</h1>
-      <p class="mt-2 text-slate-500">Tải file lên + viết yêu cầu → Agent thực hiện trên Browser Use Cloud → Nhận kết quả.</p>
+    <header>
+      <span class="nt-tag">BROWSER USE CLOUD API &bull; V4 &bull; ONLINE</span>
+      <h1 class="nt-title"><span class="nt-glitch">FILE_ANALYZER</span><span class="nt-accent">@browser-use</span></h1>
+      <p class="nt-sub">&gt; upload file + viết yêu cầu → AI agent phân tích trên cloud → nhận kết quả<span class="nt-caret">_</span></p>
     </header>
 
-    <!-- ==================== CARD CHÍNH ==================== -->
-    <main class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 sm:p-8">
-
-      <!-- Khu vực kéo-thả / chọn file -->
-      <div id="dropzone"
-           class="border-2 border-dashed border-slate-300 rounded-xl p-6 sm:p-8 text-center cursor-pointer transition-colors hover:border-indigo-500 hover:bg-indigo-50/40">
-        <input type="file" id="fileInput" class="hidden" />
-        <svg class="mx-auto w-10 h-10 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.5"
-             viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round"
-                d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5h10.5a2.25 2.25 0 0 0 2.25-2.25V6.75a2.25 2.25 0 0 0-2.25-2.25H6.75A2.25 2.25 0 0 0 4.5 6.75v10.5A2.25 2.25 0 0 0 6.75 19.5Z" />
-        </svg>
-        <p class="mt-3 text-sm">
-          Kéo thả file vào đây, hoặc
-          <span class="text-indigo-600 font-medium underline decoration-indigo-300">bấm để chọn file</span>
-        </p>
-        <p class="mt-1 text-xs text-slate-400">Tối đa 10MB — hỗ trợ CSV, TXT, JSON, PDF, ảnh… và <strong>file .zip</strong> (tự giải nén, tối đa 50 file)</p>
+    <!-- ==================== PANEL: INPUT ==================== -->
+    <div class="nt-panel">
+      <div class="nt-panel-head">
+        <span class="nt-panel-title">INPUT_DATA</span>
+        <span class="nt-dots"><i></i><i></i><i></i></span>
       </div>
 
-      <!-- Thông tin file đã chọn -->
-      <div id="fileInfo" class="hidden mt-4 flex items-center gap-3 rounded-xl border border-indigo-200 bg-indigo-50/60 px-4 py-3">
-        <svg class="w-8 h-8 shrink-0 text-indigo-500" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round"
-                d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5A3.375 3.375 0 0 0 10.125 2.25H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-        </svg>
-        <div class="min-w-0 flex-1">
-          <p id="fileName" class="text-sm font-medium truncate"></p>
-          <p id="fileMeta" class="text-xs text-slate-500"></p>
+      <div id="dropzone" class="nt-drop">
+        <input type="file" id="fileInput" class="nt-hidden-input" />
+        <p class="nt-drop-big">[ KÉO-THẢ FILE VÀO ĐÂY ]</p>
+        <p class="nt-drop-big">hoặc <span class="nt-drop-link">BẤM ĐỂ CHỌN FILE</span></p>
+        <p class="nt-drop-hint">tối đa 10MB · CSV · TXT · JSON · PDF · ảnh · .zip (tự giải nén, ≤50 file)</p>
+      </div>
+
+      <div id="fileInfo" class="nt-filechip hidden">
+        <div>
+          <div id="fileName" class="nt-file-name"></div>
+          <div id="fileMeta" class="nt-file-meta"></div>
         </div>
-        <button id="removeFileBtn" title="Xóa file" class="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+        <button id="removeFileBtn" class="nt-x" title="Xóa file">[X]</button>
+      </div>
+
+      <label class="nt-label" for="instructions">YÊU CẦU XỬ LÝ <span style="color:var(--nt-text-mute)">(tùy chọn · ≤5000 ký tự)</span></label>
+      <textarea id="instructions" class="nt-textarea" rows="3" maxlength="5000"
+                placeholder="ví dụ: viết code Python tính tổng doanh thu theo từng sản phẩm… / tóm tắt thành 5 gạch đầu dòng… / chuyển dữ liệu sang JSON…"></textarea>
+      <p class="nt-hint" style="text-align:left; margin-top:6px">để trống → agent phân tích tổng quát file · viết tiếng Việt hoặc tiếng Anh</p>
+
+      <button id="processBtn" class="nt-btn nt-btn-primary nt-btn-block" disabled><span id="btnLabel">&#9654; XỬ LÝ</span></button>
+    </div>
+
+    <!-- ==================== PANEL: PROGRESS ==================== -->
+    <div id="progressBox" class="nt-panel hidden">
+      <div class="nt-panel-head">
+        <span class="nt-panel-title">PROCESS_STATUS</span>
+        <span class="nt-badge" style="color:var(--nt-amber)">RUNNING</span>
+      </div>
+
+      <div style="display:flex; gap:16px; align-items:center;">
+        <div class="nt-ring nt-ring-lg">
+          <svg viewBox="0 0 46 46">
+            <circle class="nt-ring-bg" cx="23" cy="23" r="20"></circle>
+            <circle id="progressRingFg" class="nt-ring-fg" cx="23" cy="23" r="20"
+                    stroke-dasharray="125.6" stroke-dashoffset="125.6"></circle>
           </svg>
-        </button>
-      </div>
-
-      <!-- Ô "Yêu cầu xử lý" (tuỳ chọn) -->
-      <div class="mt-4">
-        <label for="instructions" class="block text-sm font-medium text-slate-700 mb-1.5">
-          Yêu cầu xử lý <span class="font-normal text-slate-400">(tuỳ chọn)</span>
-        </label>
-        <textarea id="instructions" rows="3" maxlength="5000"
-                  placeholder="Ví dụ: Viết code Python tính tổng doanh thu theo từng sản phẩm… / Tóm tắt file thành 5 gạch đầu dòng… / Chuyển dữ liệu sang JSON…"
-                  class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-500 resize-y"></textarea>
-        <p class="mt-1 text-xs text-slate-400">
-          Để trống nếu chỉ muốn agent phân tích tổng quát file. Viết bằng tiếng Việt hoặc tiếng Anh đều được (tối đa 5000 ký tự).
-        </p>
-      </div>
-
-      <!-- Nút Xử lý -->
-      <button id="processBtn" disabled
-              class="mt-5 w-full inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-6 py-3.5 text-white font-semibold shadow-sm transition hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:cursor-not-allowed disabled:opacity-50">
-        <svg id="btnSpinner" class="hidden w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z"></path>
-        </svg>
-        <span id="btnLabel">Xử lý</span>
-      </button>
-
-      <!-- Tiến trình (% + thông điệp agent) -->
-      <div id="progressBox" class="hidden mt-5">
-        <div class="flex items-center justify-between gap-3 text-sm">
-          <p id="progressMessage" class="text-indigo-700 font-medium truncate">Đang chuẩn bị…</p>
-          <span id="progressPct" class="shrink-0 text-indigo-700 font-bold tabular-nums">0%</span>
+          <b id="progressRingNum">0%</b>
         </div>
-        <div class="mt-2 h-2.5 bg-slate-200 rounded-full overflow-hidden">
-          <div id="progressBar" class="h-full bg-gradient-to-r from-indigo-500 to-violet-500 rounded-full transition-all duration-700 ease-out" style="width: 0%"></div>
-        </div>
-        <p id="progressHint" class="mt-1.5 text-center text-xs text-slate-400"></p>
-      </div>
-
-      <!-- Báo lỗi -->
-      <div id="errorBox" class="hidden mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-        <div class="flex items-start gap-2">
-          <svg class="w-5 h-5 shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9.75-1.5a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
-          </svg>
-          <p id="errorMsg" class="whitespace-pre-wrap break-words"></p>
+        <div style="flex:1; min-width:0;">
+          <div id="progressMessage" class="nt-prog-msg">Đang chuẩn bị…</div>
         </div>
       </div>
 
-      <!-- ==================== KẾT QUẢ ==================== -->
-      <section id="resultSection" class="hidden mt-8 border-t border-slate-200 pt-6">
-        <div class="flex flex-wrap items-center gap-2 mb-4">
-          <span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 text-emerald-700 px-3 py-1 text-xs font-semibold">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
-            </svg>
-            Hoàn tất
-          </span>
-          <span id="chipStatus" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
-          <span id="chipZip" class="hidden rounded-full bg-amber-100 text-amber-700 px-3 py-1 text-xs font-medium"></span>
-          <span id="chipModel" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
-          <span id="chipTokens" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
-          <span id="chipCost" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
-          <span id="chipTime" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
-        </div>
+      <div class="nt-progress"><i id="progressBar"></i></div>
+      <div id="progressHint" class="nt-hint"></div>
+    </div>
 
-        <!-- Tabs -->
-        <div class="flex items-center justify-between border-b border-slate-200">
-          <div class="flex gap-1">
-            <button id="tabTextBtn" class="px-4 py-2 text-sm font-semibold rounded-t-lg bg-slate-50 border border-b-0 border-slate-200 text-indigo-700">
-              Kết quả
-            </button>
-            <button id="tabJsonBtn" class="px-4 py-2 text-sm font-medium rounded-t-lg text-slate-500 hover:text-slate-700">
-              JSON
-            </button>
-          </div>
-          <button id="copyBtn" class="text-xs font-medium text-indigo-600 hover:text-indigo-800 px-2 py-1 rounded">
-            Copy
-          </button>
-        </div>
+    <!-- ==================== LỖI ==================== -->
+    <div id="errorBox" class="nt-alert hidden">
+      <p id="errorMsg" style="margin:0; white-space:pre-wrap; word-break:break-word;"></p>
+    </div>
 
-        <!-- Nội dung tab Kết quả -->
-        <div id="tabText" class="mt-4 rounded-xl bg-slate-50 border border-slate-200 p-4 max-h-[480px] overflow-auto">
-          <p id="resultText" class="text-sm leading-relaxed whitespace-pre-wrap break-words"></p>
-        </div>
+    <!-- ==================== PANEL: OUTPUT ==================== -->
+    <div id="resultSection" class="nt-panel hidden">
+      <div class="nt-panel-head">
+        <span class="nt-panel-title">OUTPUT_DATA</span>
+        <span class="nt-badge" style="color:var(--nt-green)">COMPLETE</span>
+      </div>
 
-        <!-- Nội dung tab JSON -->
-        <div id="tabJson" class="hidden mt-4 rounded-xl bg-slate-900 border border-slate-800 p-4 max-h-[480px] overflow-auto">
-          <pre id="resultJson" class="text-xs text-emerald-300 whitespace-pre-wrap break-words"></pre>
-        </div>
+      <div class="nt-chips">
+        <span id="chipStatus" class="nt-badge" style="color:var(--nt-green)"></span>
+        <span id="chipZip" class="nt-badge hidden" style="color:var(--nt-amber)" title=""></span>
+        <span id="chipModel" class="nt-badge" style="color:var(--nt-cyan)"></span>
+        <span id="chipTokens" class="nt-badge" style="color:var(--nt-text-soft)"></span>
+        <span id="chipCost" class="nt-badge" style="color:var(--nt-pink)"></span>
+        <span id="chipTime" class="nt-badge" style="color:var(--nt-text-mute)"></span>
+      </div>
 
-        <!-- Tải kết quả về máy -->
-        <div id="downloadBox" class="hidden mt-4 flex flex-wrap items-center gap-3">
-          <span class="text-xs text-slate-400">Tải kết quả về máy:</span>
-          <a id="downloadTxtBtn" href="#" download
-             class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-700">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
-            </svg>
-            Tải .txt
-          </a>
-          <a id="downloadJsonBtn" href="#" download
-             class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
-            </svg>
-            Tải .json
-          </a>
-        </div>
-      </section>
-    </main>
+      <div class="nt-tabs">
+        <button id="tabTextBtn" class="nt-tab is-active">[ KẾT_QUẢ ]</button>
+        <button id="tabJsonBtn" class="nt-tab">[ JSON ]</button>
+        <button id="copyBtn" class="nt-btn nt-btn-ghost nt-tab-sm nt-right">COPY</button>
+      </div>
 
-    <footer class="text-center text-xs text-slate-400 mt-8">
-      Node.js + Express · Browser Use Cloud API v4 · Kết quả do AI agent tạo ra
+      <div id="tabText" class="nt-out"><p id="resultText" style="margin:0"></p></div>
+      <div id="tabJson" class="nt-out is-json hidden"><pre id="resultJson"></pre></div>
+
+      <div id="downloadBox" class="nt-dl hidden">
+        <span class="nt-dl-label">TẢI_KẾT_QUẢ::</span>
+        <a id="downloadTxtBtn" href="#" download class="nt-btn nt-btn-ghost">&#9660; TẢI .TXT</a>
+        <a id="downloadJsonBtn" href="#" download class="nt-btn nt-btn-cyan">&#9660; TẢI .JSON</a>
+      </div>
+    </div>
+
+    <!-- ==================== FOOTER ==================== -->
+    <footer class="nt-footer">
+      <span class="nt-prompt">node server.js · express · browser-use cloud api v4</span><br>
+      <span class="nt-comment">kết quả do AI agent tạo ra — chi phí hiển thị ở chip</span><br>
+      <span class="nt-comment">ui: neon terminal kit — đổi biến --nt-* trong neon-terminal-ui.css để đổi màu toàn bộ giao diện</span>
     </footer>
   </div>
 
+  <script src="neon-matrix-bg.js"></script>
   <script>
     /* ==================== THAM CHIẾU PHẦN TỬ ==================== */
     const els = {
@@ -178,11 +257,11 @@
       removeFileBtn: document.getElementById('removeFileBtn'),
       instructions: document.getElementById('instructions'),
       processBtn: document.getElementById('processBtn'),
-      btnSpinner: document.getElementById('btnSpinner'),
       btnLabel: document.getElementById('btnLabel'),
       progressBox: document.getElementById('progressBox'),
+      progressRingFg: document.getElementById('progressRingFg'),
+      progressRingNum: document.getElementById('progressRingNum'),
       progressBar: document.getElementById('progressBar'),
-      progressPct: document.getElementById('progressPct'),
       progressMessage: document.getElementById('progressMessage'),
       progressHint: document.getElementById('progressHint'),
       errorBox: document.getElementById('errorBox'),
@@ -214,8 +293,10 @@
 
     const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // khớp mặc định MAX_FILE_SIZE_BYTES của server
     const POLL_INTERVAL_MS = 1500;               // chu kỳ poll tiến trình job
-    const MAX_POLL_FAILURES = 5;                  // số lần poll lỗi liên tiếp trước khi bỏ cuộc
-    const JOB_STORAGE_KEY = 'browserUseJobId';    // jobId để nối lại job sau khi refresh trang
+    const MAX_POLL_FAILURES = 5;                 // số lần poll lỗi liên tiếp trước khi bỏ cuộc
+    const JOB_STORAGE_KEY = 'browserUseJobId';   // jobId để nối lại job sau khi refresh trang
+    const SPINNER_CHARS = ['|', '/', '-', '\\'];  // spinner kiểu terminal
+    const RING_CIRCUMFERENCE = 125.6;             // 2π·r với r=20 (khớp svg viewBox)
 
     /* ==================== TIỆN ÍCH ==================== */
     function sleep(ms) {
@@ -279,32 +360,33 @@
     function startLoading() {
       loading = true;
       updateProcessButton();
-      els.btnSpinner.classList.remove('hidden');
-      els.dropzone.classList.add('pointer-events-none', 'opacity-60');
-      els.instructions.classList.add('opacity-60');
+      els.dropzone.classList.add('is-disabled');
+      els.instructions.disabled = true;
       els.progressBox.classList.remove('hidden');
+      els.progressRingFg.setAttribute('stroke-dashoffset', RING_CIRCUMFERENCE.toFixed(1));
+      els.progressRingNum.textContent = '0%';
       els.progressBar.style.width = '0%';
-      els.progressPct.textContent = '0%';
       els.progressMessage.textContent = 'Đang chuẩn bị…';
       els.progressHint.textContent = '';
       els.resultSection.classList.add('hidden');
       hideError();
 
       const startedAt = Date.now();
+      let spinIndex = 0;
       elapsedTimerId = setInterval(() => {
         const seconds = Math.round((Date.now() - startedAt) / 1000);
-        els.btnLabel.textContent = `Đang xử lý · ${seconds}s`;
+        els.btnLabel.textContent = `[${SPINNER_CHARS[spinIndex % SPINNER_CHARS.length]}] ĐANG XỬ LÝ · ${seconds}s`;
+        spinIndex += 1;
       }, 250);
-      els.btnLabel.textContent = 'Đang xử lý · 0s';
+      els.btnLabel.textContent = '[|] ĐANG XỬ LÝ · 0s';
     }
 
     function stopLoading() {
       loading = false;
       updateProcessButton();
-      els.btnSpinner.classList.add('hidden');
-      els.btnLabel.textContent = 'Xử lý';
-      els.dropzone.classList.remove('pointer-events-none', 'opacity-60');
-      els.instructions.classList.remove('opacity-60');
+      els.btnLabel.innerHTML = '&#9654; XỬ LÝ';
+      els.dropzone.classList.remove('is-disabled');
+      els.instructions.disabled = false;
       if (elapsedTimerId) {
         clearInterval(elapsedTimerId);
         elapsedTimerId = null;
@@ -314,8 +396,11 @@
     /* ==================== TIẾN TRÌNH ==================== */
     function updateProgressUI(state) {
       const pct = Math.max(0, Math.min(100, state.progress || 0));
+
+      // Ring: dashoffset giảm dần từ 125.6 (0%) về 0 (100%)
+      els.progressRingFg.setAttribute('stroke-dashoffset', (RING_CIRCUMFERENCE * (1 - pct / 100)).toFixed(1));
+      els.progressRingNum.textContent = `${pct}%`;
       els.progressBar.style.width = `${pct}%`;
-      els.progressPct.textContent = `${pct}%`;
       if (state.message) els.progressMessage.textContent = state.message;
 
       const bits = [];
@@ -373,21 +458,21 @@
       els.resultText.textContent = data.result && data.result.text ? data.result.text : '(Không có nội dung)';
       els.resultJson.textContent = JSON.stringify(data, null, 2);
 
-      els.chipStatus.textContent = `Trạng thái: ${data.status || '—'}`;
+      els.chipStatus.textContent = `STATUS: ${data.status || '—'}`;
       const zipInfo = data.file && data.file.isZip ? data.file : null;
       if (zipInfo) {
-        els.chipZip.textContent = `ZIP → ${zipInfo.extractedCount} file đã giải nén`;
+        els.chipZip.textContent = `ZIP → ${zipInfo.extractedCount} FILE`;
         els.chipZip.title = (zipInfo.extractedFiles || []).map((f) => `${f.name} (${formatBytes(f.size)})`).join('\n');
         els.chipZip.classList.remove('hidden');
       } else {
         els.chipZip.classList.add('hidden');
       }
-      els.chipModel.textContent = data.run && data.run.model ? `Model: ${data.run.model}` : '';
+      els.chipModel.textContent = data.run && data.run.model ? `MODEL: ${data.run.model}` : '';
       els.chipModel.classList.toggle('hidden', !data.run || !data.run.model);
-      els.chipTokens.textContent = `Tokens: ${data.result.inputTokens ?? 0} vào / ${data.result.outputTokens ?? 0} ra`;
-      els.chipCost.textContent = data.result.costUsd != null ? `Chi phí: $${data.result.costUsd}` : '';
+      els.chipTokens.textContent = `TOKENS: ${data.result.inputTokens ?? 0} IN / ${data.result.outputTokens ?? 0} OUT`;
+      els.chipCost.textContent = data.result.costUsd != null ? `COST: $${data.result.costUsd}` : '';
       els.chipCost.classList.toggle('hidden', data.result.costUsd == null);
-      els.chipTime.textContent = data.elapsedMs != null ? `Thời gian: ${(data.elapsedMs / 1000).toFixed(1)}s` : '';
+      els.chipTime.textContent = data.elapsedMs != null ? `TIME: ${(data.elapsedMs / 1000).toFixed(1)}S` : '';
 
       els.progressBox.classList.add('hidden');
       els.errorBox.classList.add('hidden');
@@ -408,18 +493,16 @@
 
     function switchTab(tab) {
       currentTab = tab;
-      const activeClasses = ['bg-slate-50', 'border', 'border-b-0', 'border-slate-200', 'text-indigo-700', 'font-semibold'];
-      const inactiveClasses = ['text-slate-500', 'hover:text-slate-700', 'font-medium'];
       if (tab === 'text') {
         els.tabText.classList.remove('hidden');
         els.tabJson.classList.add('hidden');
-        els.tabTextBtn.className = 'px-4 py-2 text-sm rounded-t-lg ' + activeClasses.join(' ');
-        els.tabJsonBtn.className = 'px-4 py-2 text-sm rounded-t-lg ' + inactiveClasses.join(' ');
+        els.tabTextBtn.classList.add('is-active');
+        els.tabJsonBtn.classList.remove('is-active');
       } else {
         els.tabText.classList.add('hidden');
         els.tabJson.classList.remove('hidden');
-        els.tabJsonBtn.className = 'px-4 py-2 text-sm rounded-t-lg ' + activeClasses.join(' ');
-        els.tabTextBtn.className = 'px-4 py-2 text-sm rounded-t-lg ' + inactiveClasses.join(' ');
+        els.tabJsonBtn.classList.add('is-active');
+        els.tabTextBtn.classList.remove('is-active');
       }
     }
 
@@ -482,13 +565,13 @@
     ['dragenter', 'dragover'].forEach((evt) =>
       els.dropzone.addEventListener(evt, (e) => {
         e.preventDefault();
-        els.dropzone.classList.add('border-indigo-500', 'bg-indigo-50/60');
+        els.dropzone.classList.add('is-over');
       })
     );
     ['dragleave', 'drop'].forEach((evt) =>
       els.dropzone.addEventListener(evt, (e) => {
         e.preventDefault();
-        els.dropzone.classList.remove('border-indigo-500', 'bg-indigo-50/60');
+        els.dropzone.classList.remove('is-over');
       })
     );
     els.dropzone.addEventListener('drop', (e) => {
@@ -505,7 +588,7 @@
       const text = currentTab === 'text' ? els.resultText.textContent : els.resultJson.textContent;
       try {
         await navigator.clipboard.writeText(text);
-        els.copyBtn.textContent = 'Đã copy!';
+        els.copyBtn.textContent = 'ĐÃ COPY';
       } catch {
         const ta = document.createElement('textarea');
         ta.value = text;
@@ -513,9 +596,9 @@
         ta.select();
         document.execCommand('copy');
         document.body.removeChild(ta);
-        els.copyBtn.textContent = 'Đã copy!';
+        els.copyBtn.textContent = 'ĐÃ COPY';
       }
-      setTimeout(() => { els.copyBtn.textContent = 'Copy'; }, 1500);
+      setTimeout(() => { els.copyBtn.textContent = 'COPY'; }, 1500);
     });
 
     // Kiểm tra server sống + nối lại job đang chạy (nếu có) khi mở trang

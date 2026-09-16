@@ -1,0 +1,316 @@
+/* ============================================================
+   NEON TERMINAL UI KIT  v1.0
+   Giao dien "hacker terminal" tai su dung duoc: chi can copy file
+   nay + neon-matrix-bg.js sang website khac.
+   Prefix class: .nt-*  (khong dung chung ten voi framework khac)
+   Nguon: folder "toàn bộ giao diện ui" (template mau cua user)
+   ============================================================ */
+
+:root {
+  --nt-green: #00ff9c;
+  --nt-green-dim: #00c37a;
+  --nt-cyan: #00e5ff;
+  --nt-pink: #ff2bd6;
+  --nt-amber: #ffb300;
+  --nt-danger: #ff2b5e;
+  --nt-bg: #02040a;
+  --nt-bg-panel: #050b10;
+  --nt-bg-field: #01050c;
+  --nt-line: rgba(0, 255, 156, 0.35);
+  --nt-line-soft: rgba(0, 255, 156, 0.16);
+  --nt-text: #00ff9c;
+  --nt-text-soft: #8ef2c4;
+  --nt-text-mute: #2f6b52;
+  --nt-radius: 4px;
+  --nt-radius-lg: 8px;
+  --nt-mono: Consolas, Menlo, "Courier New", ui-monospace, monospace;
+  --nt-glow: 0 0 15px rgba(0, 255, 156, 0.5);
+}
+
+/* --- Base ------------------------------------------------- */
+.nt-scope,
+body.nt-body {
+  margin: 0;
+  min-height: 100%;
+  font-family: var(--nt-mono);
+  color: var(--nt-text);
+  background-color: var(--nt-bg);
+  background-image:
+    radial-gradient(circle at 20% 10%, rgba(0, 255, 156, 0.08), transparent 40%),
+    radial-gradient(circle at 80% 80%, rgba(0, 229, 255, 0.06), transparent 45%);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Nen matrix (canvas do JS ve) + lop scanline
+   LUU Y: canvas la "replaced element" — inset:0 KHONG keo gian no full man hinh
+   (no giu kich thuoc intrinsic 300x150 mac dinh). Phai gan RO width/height 100%. */
+#nt-matrix {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: 0;
+  opacity: 0.5;
+  pointer-events: none;
+}
+.nt-scanlines {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0 2px,
+    rgba(0, 0, 0, 0.35) 2px 3px
+  );
+  mix-blend-mode: multiply;
+}
+
+.nt-wrap {
+  position: relative;
+  z-index: 2;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 28px 16px 56px;
+}
+
+/* --- Header ----------------------------------------------- */
+.nt-tag {
+  display: block;
+  width: fit-content;
+  margin: 0 auto 18px;
+  padding: 6px 14px;
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: var(--nt-green);
+  border: 1px solid var(--nt-line);
+  border-radius: var(--nt-radius);
+  background: rgba(0, 255, 156, 0.05);
+  animation: nt-pulse 2.4s ease-in-out infinite;
+}
+@keyframes nt-pulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(0, 255, 156, 0); }
+  50%      { box-shadow: 0 0 18px rgba(0, 255, 156, 0.45); }
+}
+
+.nt-title {
+  margin: 0;
+  text-align: center;
+  font-size: clamp(26px, 7vw, 34px);
+  letter-spacing: 3px;
+  text-shadow: 0 0 5px var(--nt-green), 0 0 15px rgba(0, 255, 156, 0.6),
+               0 0 30px rgba(0, 255, 156, 0.35);
+}
+.nt-title .nt-accent { color: #fff; text-shadow: 0 0 12px var(--nt-cyan); }
+.nt-glitch { position: relative; display: inline-block; animation: nt-glitch 4s steps(1) infinite; }
+@keyframes nt-glitch {
+  0%, 92%, 100% { transform: none; text-shadow: 0 0 5px var(--nt-green); }
+  93% { transform: translate(-2px, 1px); text-shadow: 2px 0 var(--nt-pink), -2px 0 var(--nt-cyan); }
+  96% { transform: translate(2px, -1px); text-shadow: -2px 0 var(--nt-pink), 2px 0 var(--nt-cyan); }
+}
+
+.nt-sub {
+  margin: 10px 0 0;
+  text-align: center;
+  font-size: 13px;
+  letter-spacing: 1px;
+  color: var(--nt-text-soft);
+}
+.nt-caret { animation: nt-blink 1s steps(1) infinite; }
+@keyframes nt-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+/* --- Panel (card) ----------------------------------------- */
+.nt-panel {
+  position: relative;
+  overflow: hidden;
+  margin: 22px 0;
+  padding: 18px;
+  background: var(--nt-bg-panel);
+  border: 1px solid var(--nt-line-soft);
+  border-left: 3px solid var(--nt-green);
+  border-radius: var(--nt-radius-lg);
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.6), inset 0 0 40px rgba(0, 255, 156, 0.03);
+}
+/* Vach sang chay ngang mep tren panel */
+.nt-panel::before {
+  content: "";
+  position: absolute;
+  top: 0; left: -40%;
+  width: 40%; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--nt-green), transparent);
+  animation: nt-sweep 4s linear infinite;
+}
+@keyframes nt-sweep { to { left: 100%; } }
+
+.nt-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.nt-panel-title {
+  font-size: 14px;
+  letter-spacing: 2px;
+  text-shadow: 0 0 8px rgba(0, 255, 156, 0.7);
+}
+.nt-panel-title::before { content: "\25B8  "; }
+.nt-slot { font-size: 10px; letter-spacing: 2px; color: var(--nt-text-mute); }
+
+.nt-dots { display: inline-flex; gap: 6px; vertical-align: middle; }
+.nt-dots i { width: 9px; height: 9px; border-radius: 50%; display: block; }
+.nt-dots i:nth-child(1) { background: var(--nt-danger); }
+.nt-dots i:nth-child(2) { background: var(--nt-amber); }
+.nt-dots i:nth-child(3) { background: var(--nt-green); }
+
+/* --- Form ------------------------------------------------- */
+.nt-label {
+  display: block;
+  margin: 14px 0 6px;
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: var(--nt-text-soft);
+}
+.nt-req { color: var(--nt-danger); margin-right: 4px; }
+
+.nt-input, .nt-select, .nt-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  font-family: var(--nt-mono);
+  font-size: 14px;
+  letter-spacing: 1px;
+  color: var(--nt-text);
+  background: var(--nt-bg-field);
+  border: 1px solid var(--nt-line);
+  border-radius: var(--nt-radius);
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.nt-select { width: auto; padding: 7px 10px; font-size: 13px; }
+.nt-input::placeholder, .nt-textarea::placeholder { color: var(--nt-text-mute); }
+.nt-input:focus, .nt-select:focus, .nt-textarea:focus {
+  border-color: var(--nt-green);
+  box-shadow: 0 0 12px rgba(0, 255, 156, 0.35);
+}
+
+.nt-row { display: flex; gap: 10px; align-items: center; }
+.nt-row > .nt-input { flex: 1; }
+.nt-inline { display: flex; align-items: center; gap: 10px; }
+
+/* --- Buttons ---------------------------------------------- */
+.nt-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  font-family: var(--nt-mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  border: 0;
+  border-radius: var(--nt-radius);
+  cursor: pointer;
+  transition: transform .12s, box-shadow .15s, filter .15s;
+}
+.nt-btn:active { transform: translateY(1px); }
+a.nt-btn { text-decoration: none; }
+
+.nt-btn-primary {
+  color: #02180f;
+  background: linear-gradient(135deg, var(--nt-green), var(--nt-green-dim));
+  box-shadow: var(--nt-glow);
+}
+.nt-btn-primary:hover { filter: brightness(1.12); box-shadow: 0 0 26px rgba(0, 255, 156, 0.75); }
+
+.nt-btn-ghost {
+  color: var(--nt-green);
+  background: rgba(0, 255, 156, 0.06);
+  border: 1px solid var(--nt-line);
+}
+.nt-btn-ghost:hover { background: rgba(0, 255, 156, 0.14); box-shadow: var(--nt-glow); }
+
+.nt-btn-cyan {
+  color: #011a1f;
+  background: linear-gradient(135deg, var(--nt-cyan), #00a5bd);
+  box-shadow: 0 0 15px rgba(0, 229, 255, 0.5);
+}
+.nt-btn-cyan:hover { filter: brightness(1.12); box-shadow: 0 0 26px rgba(0, 229, 255, 0.75); }
+.nt-btn[disabled] { opacity: .45; cursor: not-allowed; box-shadow: none; }
+
+/* --- Display / output box --------------------------------- */
+.nt-display {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 18px;
+  background: var(--nt-bg-field);
+  border: 1px solid var(--nt-line-soft);
+  border-radius: var(--nt-radius);
+}
+.nt-code {
+  font-size: clamp(22px, 6vw, 30px);
+  letter-spacing: 6px;
+  text-shadow: 0 0 12px rgba(0, 255, 156, 0.8);
+}
+.nt-code.is-empty { color: var(--nt-text-mute); text-shadow: none; }
+
+/* Vong dem thoi gian: <div class="nt-ring"><svg>...</svg><b>30</b></div> */
+.nt-ring { position: relative; width: 46px; height: 46px; flex: 0 0 auto; }
+.nt-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.nt-ring circle { fill: none; stroke-width: 3; }
+.nt-ring .nt-ring-bg { stroke: rgba(0, 255, 156, 0.15); }
+.nt-ring .nt-ring-fg {
+  stroke: var(--nt-green);
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 6px var(--nt-green));
+  transition: stroke-dashoffset 1s linear;
+}
+.nt-ring b {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  font-size: 14px; font-weight: 700;
+}
+
+/* --- Status / badge --------------------------------------- */
+.nt-status { margin-top: 10px; font-size: 12px; letter-spacing: 1px; min-height: 16px; }
+.nt-status.is-ok    { color: var(--nt-green); }
+.nt-status.is-warn  { color: var(--nt-amber); }
+.nt-status.is-error { color: var(--nt-danger); }
+
+.nt-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+}
+
+/* --- Footer ----------------------------------------------- */
+.nt-footer {
+  margin-top: 34px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--nt-text-mute);
+}
+.nt-prompt { color: var(--nt-green); }
+.nt-prompt::before { content: "$ "; }
+.nt-comment::before { content: "// "; }
+
+/* --- Utilities -------------------------------------------- */
+.nt-right { margin-left: auto; }
+.nt-mt { margin-top: 16px; }
+.nt-grid { display: grid; gap: 22px; }
+@media (max-width: 480px) {
+  .nt-row { flex-wrap: wrap; }
+  .nt-row > .nt-btn { width: 100%; justify-content: center; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nt-tag, .nt-glitch, .nt-caret, .nt-panel::before { animation: none; }
+}

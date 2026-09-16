@@ -10,6 +10,71 @@
 
 ---
 
+## [1.4.1] - 2026-09-16
+
+### Fixed — Nền matrix chỉ chạy ở góc trên trái, không full màn hình
+
+- **`public/neon-terminal-ui.css` (`#nt-matrix`)**: canvas là **replaced element** nên `inset: 0` KHÔNG kéo giãn nó full màn hình — nó giữ kích thước intrinsic mặc định **300×150px** đặt ở top-left (đúng triệu chứng "mưa ký tự chỉ ở góc trên bên trái"). `.nt-scanlines` là div thường nên vẫn full — do đó chỉ nền mưa bị lỗi.
+- Sửa: thay `inset: 0` bằng `top: 0; left: 0; width: 100%; height: 100%; display: block;` → layout width/height = viewport → `clientWidth/clientHeight` trong `resize()` của `neon-matrix-bg.js` tính đúng → buffer canvas phủ toàn màn hình, mưa ký tự chạy full trang.
+- Ghi chú: file kit gốc trong folder template `toàn bộ giao diện ui` vẫn còn bug này (không sửa file của user) — nếu tái sử dụng kit ở nơi khác, áp cùng fix cho `#nt-matrix`.
+- `package.json` → 1.4.1.
+
+### Verified
+
+- ✅ `GET /neon-terminal-ui.css` trả bản đã sửa (`width: 100%; height: 100%` thay cho `inset: 0`), index 200, health OK sau restart.
+- ✅ Toàn bộ phần tử/id khác không đổi (chỉ 1 rule CSS).
+
+---
+
+## [1.4.0] - 2026-09-16
+
+### Changed — Chuyển toàn bộ UI sang giao diện terminal/matrix (lượt làm việc thứ 6)
+
+- **`public/index.html` viết lại hoàn toàn** theo UI kit mẫu trong folder `toàn bộ giao diện ui` của user:
+  - Cấu trúc: `body.nt-body` → canvas `#nt-matrix` (mưa ký tự) + `.nt-scanlines` + `.nt-wrap` chứa các `.nt-panel` (INPUT_DATA, PROCESS_STATUS, OUTPUT_DATA).
+  - Hiệu ứng: glitch title `FILE_ANALYZER@browser-use` (nhấp nháy pink/cyan), tag nhấp nháy, vệt sáng quét mép panel, caret nhấp nháy, mưa ký tự matrix nền.
+  - Progress: **vòng ring SVG** (r=20, dashoffset 125.6→0 theo %) với số % giữa vòng + thanh bar mảnh neon bên dưới + dòng `> message` của agent.
+  - Spinner **ASCII** `[\|/-]` trên nút "XỬ LÝ" khi đang chạy; nút = `nt-btn-primary` xanh neon.
+  - Tabs `[ KẾT_QUẢ ]` / `[ JSON ]` kiểu terminal, chips `nt-badge` (status xanh, ZIP amber, model cyan, tokens soft, cost pink, time mute), alert `[!] ERR ::` viền đỏ, nút tải kết quả `▼ TẢI .TXT/.JSON`.
+  - **Bỏ Tailwind CDN** — không còn phụ thuộc internet cho UI.
+- **`public/neon-terminal-ui.css` + `public/neon-matrix-bg.js`**: copy nguyên văn 2 file kit từ folder template sang `public/` (kit thiết kế drop-in, prefix `.nt-` không xung đột framework).
+- **Logic JS giữ nguyên 100%** (chỉ đổi lớp hiển thị): upload/kéo-thả, instructions, job poll 1.5s, progress %, localStorage resume, copy, download — đã extract inline JS và `node --check` sạch.
+- `REQUIREMENTS.md` bump 1.4.0: bảng công nghệ (Neon Terminal UI Kit thay Tailwind), FR-12 mới, thêm tiêu chí nghiệm thu UI.
+
+### Quyết định kỹ thuật
+
+1. **Giữ nguyên toàn bộ id phần tử + logic fetch/poll** — chỉ thay đổi lớp markup/class CSS → rủi ro hồi quy gần bằng 0, API phía server không đổi.
+2. **Progress ring tái dùng `.nt-ring` của kit**: vòng đếm ngược của template được tính lại thành vòng % (dashoffset = C·(1−%/100)), giữ đúng ngôn ngữ thiết kế của kit.
+3. **Extensions (dropzone, tabs, bar, chips, alert…) đặt trong `<style>` riêng của index.html** với biến `--nt-*` của kit — không sửa file kit để giữ tính "drop-in" copy được.
+
+### Verified
+
+- ✅ Extract inline JS → `node --check` sạch.
+- ✅ Server 3000 khởi động lại: GET `/` trả trang terminal mới, `GET /neon-terminal-ui.css` và `GET /neon-matrix-bg.js` trả 200.
+- ✅ Đủ các id cũ trên trang (dropzone, processBtn, progressBox, resultSection, downloadBox…) — JS gắn đúng phần tử.
+- ✅ Hồi quy: API/flow không đổi (server.js không sửa dòng nào trong lượt này).
+
+---
+
+## [1.3.0] - 2026-09-16
+
+### Changed — Lô upload ZIP ≤20/request + tự chia nhỏ khi API từ chối (lượt làm việc thứ 5)
+
+- **`server.js`**: lô upload nâng từ 10 → **`UPLOAD_BATCH_SIZE` (mặc định 20) file/request**.
+  - Hàm mới `registerUploadBatch()`: đăng ký 1 lô lấy presigned URL; nếu API trả **422** vì lô quá lớn (schema API v4 hiện ghi `maxItems: 10`/request) → **tự chia đôi lô** và đăng ký lại từng nửa (đệ quy — 20→10+10, 15→8+7…), ghi `[WARN]` kèm kích thước lô. Không mất file, không cần cấu hình lại, sẵn sàng khi Browser Use nới limit.
+  - Lý do không đặt cứng 20: đã đối chiếu lại OpenAPI v4 ngày 2026-09-16 — upload endpoint vẫn `maxItems: 10`; gửi thẳng 20 sẽ bị 422 luôn. Cơ chế adaptive vừa đáp ứng yêu cầu "lô ≤20/request" vừa chạy đúng với API thật hôm nay.
+- **`test/mock-api.js`**: ép đúng giới hạn `maxItems=10` như API thật (trả 422 kiểu `too_long` như FastAPI); log kích thước từng lô upload nhận được vào kết quả run (`Các lô upload đã nhận: [...]`) để kiểm chứng cơ chế chia lô.
+- `.env.example` thêm `UPLOAD_BATCH_SIZE=20`; `REQUIREMENTS.md` bump 1.3.0 (FR-10, bảng env); `package.json` → 1.3.0.
+
+### Verified
+
+- ✅ Mock E2E ZIP 15 file: request đầu 15 file → mock trả 422 → server tự chia 8+7 → **cả 15 file upload đủ**, mock log lô `[15, 8, 7]`.
+- ✅ Mock E2E ZIP 20 file: lô `[20, 10, 10]` — 20 file đủ, `attachedFileIds` đủ 20.
+- ✅ Hồi quy file thường + ZIP 2 file: batch ≤10 đi thẳng, không chia nhỏ.
+- ✅ `node --check` sạch.
+
+---
+
 ## [1.2.1] - 2026-09-16
 
 ### Added — Link tải kết quả ngay trên web sau khi hoàn thành (lượt làm việc thứ 4)
