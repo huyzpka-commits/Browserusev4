@@ -7,13 +7,16 @@ Web app upload file → AI agent trên **Browser Use Cloud API (v4)** phân tíc
 ## Tính năng
 
 - Kéo-thả / chọn file (tối đa 10MB mặc định, mọi định dạng: CSV, TXT, JSON, PDF, ảnh…)
+- **Hỗ trợ file .zip**: server tự giải nén trong RAM rồi upload từng file vào workspace (tối đa 50 file, 100MB sau giải nén; chống zip bomb) — agent thấy từng file thay vì file nén
 - **Ô "Yêu cầu xử lý" tuỳ chọn**: viết yêu cầu riêng cho agent — phân tích, viết code xử lý file, chuyển đổi dữ liệu… (để trống → phân tích tổng quát)
 - File được **upload thật lên Workspace** của Browser Use và đính kèm vào Run (`attachedFileIds`) — agent đọc được nội dung gốc của file
 - **% tiến trình theo thời gian thực**: progress bar + % + thông điệp hoạt động gần nhất của agent ("Agent: …"), tính từ Run Events thật của API v4
+- **Task lâu không bị lỗi**: timeout 2 tầng — sau 15 phút chỉ cảnh báo "đang lâu hơn dự kiến" và tiếp tục chờ, tới 30 phút mới dừng (cấu hình được)
 - Refresh trang không mất job — UI tự nối lại job đang chạy qua `localStorage`
 - Kết quả hiển thị 2 tab: **Kết quả** (text tiếng Việt) và **JSON** (response đầy đủ của API)
-- Chip thông tin: model, tokens input/output, chi phí USD, thời gian chạy, Run ID
-- Xử lý lỗi đầy đủ (API key sai, hết credits, rate limit, timeout, file quá lớn…) — thông báo tiếng Việt
+- **Tải kết quả về máy ngay trên web**: sau khi hoàn thành có 2 nút "Tải .txt" / "Tải .json" — server lưu sẵn vào thư mục `outputs/` (giữ 24h)
+- Chip thông tin: model, tokens input/output, chi phí USD, thời gian chạy, Run ID, số file ZIP đã giải nén
+- Xử lý lỗi đầy đủ (API key sai, hết credits, rate limit, timeout, file quá lớn, ZIP hỏng…) — thông báo tiếng Việt
 - CORS mở sẵn cho frontend gọi cross-origin
 
 ## Kiến trúc & luồng (job-based, v1.1.0)
@@ -140,13 +143,28 @@ Lỗi đầu vào (thiếu file, thiếu key, file quá lớn…) vẫn trả đ
 {
   "success": true, "runId": "9b2c…", "status": "completed", "jobId": "…", "progress": 100,
   "result": { "text": "Tóm tắt nội dung file…", "inputTokens": 1234, "outputTokens": 567, "costUsd": "0.012" },
-  "file": { "name": "data.csv", "contentType": "text/csv", "size": 2048 },
+  "file": { "name": "data.zip", "contentType": "application/zip", "size": 2048,
+            "isZip": true, "extractedCount": 3,
+            "extractedFiles": [{ "name": "a.csv", "size": 1024 }, { "name": "b.txt", "size": 512 }, { "name": "c.json", "size": 512 }] },
   "elapsedMs": 45000,
   "run": { "…": "RunSummary đầy đủ từ Browser Use API v4" }
 }
 ```
 
+*(File thường: object `file` chỉ gồm `name`, `contentType`, `size` — không có các field ZIP.)*
+
 **Thất bại:** `{ "success": false, "jobId": "…", "status": "failed", "error": "thông báo tiếng Việt", "details": { } }` · **Job hết hạn / server restart:** 404.
+
+### `GET /api/jobs/{jobId}/download?type=txt|json` — tải kết quả về máy
+
+Sau khi job hoàn thành, bấm nút **"Tải .txt" / "Tải .json"** trên web hoặc gọi trực tiếp:
+
+```bash
+curl -OJ "http://localhost:3000/api/jobs/<jobId>/download?type=txt"
+```
+
+- Server ghi sẵn `outputs/<jobId>.txt` (kết quả + header metadata) và `outputs/<jobId>.json` (response đầy đủ); file giữ 24h rồi tự xoá.
+- Link tải vẫn hoạt động sau khi job hết hạn trong RAM.
 
 Test bằng curl (2 bước):
 
@@ -178,6 +196,8 @@ curl -s http://localhost:3000/api/jobs/$JOB_ID
 - **Kết quả text trống** → task có thể không cần duyệt web; agent vẫn trả `run.result` — xem tab JSON để kiểm tra `run.error`.
 - **"Job không còn tồn tại"** → server đã khởi động lại hoặc job quá 30 phút — gửi lại yêu cầu.
 - **Refresh trang giữa lúc agent đang chạy** → không sao, UI tự nối lại job qua `localStorage`.
+- **ZIP bị từ chối** → ZIP phải là định dạng chuẩn, tối đa 50 file và 100MB sau giải nén; file hỏng/rỗng/lẫn `__MACOSX` sẽ được bỏ qua.
+- **Task trên 15 phút** → UI hiện cảnh báo "đang lâu hơn dự kiến" nhưng vẫn chờ tới tối đa 30 phút; tăng `TASK_HARD_TIMEOUT_MS` trong `.env` nếu cần chờ lâu hơn.
 
 ## Tài liệu liên quan
 

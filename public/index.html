@@ -34,7 +34,7 @@
           Kéo thả file vào đây, hoặc
           <span class="text-indigo-600 font-medium underline decoration-indigo-300">bấm để chọn file</span>
         </p>
-        <p class="mt-1 text-xs text-slate-400">Tối đa 10MB — hỗ trợ CSV, TXT, JSON, PDF, ảnh…</p>
+        <p class="mt-1 text-xs text-slate-400">Tối đa 10MB — hỗ trợ CSV, TXT, JSON, PDF, ảnh… và <strong>file .zip</strong> (tự giải nén, tối đa 50 file)</p>
       </div>
 
       <!-- Thông tin file đã chọn -->
@@ -109,6 +109,7 @@
             Hoàn tất
           </span>
           <span id="chipStatus" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
+          <span id="chipZip" class="hidden rounded-full bg-amber-100 text-amber-700 px-3 py-1 text-xs font-medium"></span>
           <span id="chipModel" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
           <span id="chipTokens" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
           <span id="chipCost" class="rounded-full bg-slate-100 text-slate-600 px-3 py-1 text-xs font-medium"></span>
@@ -138,6 +139,25 @@
         <!-- Nội dung tab JSON -->
         <div id="tabJson" class="hidden mt-4 rounded-xl bg-slate-900 border border-slate-800 p-4 max-h-[480px] overflow-auto">
           <pre id="resultJson" class="text-xs text-emerald-300 whitespace-pre-wrap break-words"></pre>
+        </div>
+
+        <!-- Tải kết quả về máy -->
+        <div id="downloadBox" class="hidden mt-4 flex flex-wrap items-center gap-3">
+          <span class="text-xs text-slate-400">Tải kết quả về máy:</span>
+          <a id="downloadTxtBtn" href="#" download
+             class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-700">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+            </svg>
+            Tải .txt
+          </a>
+          <a id="downloadJsonBtn" href="#" download
+             class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+            </svg>
+            Tải .json
+          </a>
         </div>
       </section>
     </main>
@@ -169,6 +189,7 @@
       errorMsg: document.getElementById('errorMsg'),
       resultSection: document.getElementById('resultSection'),
       chipStatus: document.getElementById('chipStatus'),
+      chipZip: document.getElementById('chipZip'),
       chipModel: document.getElementById('chipModel'),
       chipTokens: document.getElementById('chipTokens'),
       chipCost: document.getElementById('chipCost'),
@@ -180,6 +201,9 @@
       resultText: document.getElementById('resultText'),
       resultJson: document.getElementById('resultJson'),
       copyBtn: document.getElementById('copyBtn'),
+      downloadBox: document.getElementById('downloadBox'),
+      downloadTxtBtn: document.getElementById('downloadTxtBtn'),
+      downloadJsonBtn: document.getElementById('downloadJsonBtn'),
     };
 
     /* ==================== TRẠNG THÁI ==================== */
@@ -190,7 +214,7 @@
 
     const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // khớp mặc định MAX_FILE_SIZE_BYTES của server
     const POLL_INTERVAL_MS = 1500;               // chu kỳ poll tiến trình job
-    const MAX_POLL_FAILURES = 3;                  // số lần poll lỗi liên tiếp trước khi bỏ cuộc
+    const MAX_POLL_FAILURES = 5;                  // số lần poll lỗi liên tiếp trước khi bỏ cuộc
     const JOB_STORAGE_KEY = 'browserUseJobId';    // jobId để nối lại job sau khi refresh trang
 
     /* ==================== TIỆN ÍCH ==================== */
@@ -350,6 +374,14 @@
       els.resultJson.textContent = JSON.stringify(data, null, 2);
 
       els.chipStatus.textContent = `Trạng thái: ${data.status || '—'}`;
+      const zipInfo = data.file && data.file.isZip ? data.file : null;
+      if (zipInfo) {
+        els.chipZip.textContent = `ZIP → ${zipInfo.extractedCount} file đã giải nén`;
+        els.chipZip.title = (zipInfo.extractedFiles || []).map((f) => `${f.name} (${formatBytes(f.size)})`).join('\n');
+        els.chipZip.classList.remove('hidden');
+      } else {
+        els.chipZip.classList.add('hidden');
+      }
       els.chipModel.textContent = data.run && data.run.model ? `Model: ${data.run.model}` : '';
       els.chipModel.classList.toggle('hidden', !data.run || !data.run.model);
       els.chipTokens.textContent = `Tokens: ${data.result.inputTokens ?? 0} vào / ${data.result.outputTokens ?? 0} ra`;
@@ -360,6 +392,16 @@
       els.progressBox.classList.add('hidden');
       els.errorBox.classList.add('hidden');
       els.resultSection.classList.remove('hidden');
+
+      // Link tải kết quả về máy (server lưu sẵn trong outputs/)
+      if (data.jobId) {
+        els.downloadTxtBtn.href = `/api/jobs/${encodeURIComponent(data.jobId)}/download?type=txt`;
+        els.downloadJsonBtn.href = `/api/jobs/${encodeURIComponent(data.jobId)}/download?type=json`;
+        els.downloadBox.classList.remove('hidden');
+      } else {
+        els.downloadBox.classList.add('hidden');
+      }
+
       switchTab('text');
       els.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }

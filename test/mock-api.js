@@ -25,7 +25,9 @@ app.use(express.json());
 
 const workspaces = new Map();
 const runs = new Map();
-let lastUploadedBytes = Buffer.alloc(0);
+// Bytes/số file đã PUT kể từ lần tạo run gần nhất (reset sau mỗi run)
+let bytesSinceLastRun = 0;
+let filesSinceLastRun = 0;
 
 function uuid() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -69,7 +71,8 @@ app.put('/mock-upload/:fileId', (req, res) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
-    lastUploadedBytes = Buffer.concat(chunks);
+    bytesSinceLastRun += Buffer.concat(chunks).length;
+    filesSinceLastRun += 1;
     res.sendStatus(200);
   });
 });
@@ -82,11 +85,15 @@ app.post('/runs', (req, res) => {
     model: req.body.model || 'gpt-5.6-luna',
     status: 'queued',
     workspaceId: req.body.workspaceId,
-    uploadedBytes: lastUploadedBytes.length,
+    uploadedBytes: bytesSinceLastRun,
+    uploadedFiles: filesSinceLastRun,
     events: [],
     createdAt: new Date().toISOString(),
   };
   runs.set(runId, run);
+  // Reset cho run kế tiếp: các PUT sau đây thuộc về run mới
+  bytesSinceLastRun = 0;
+  filesSinceLastRun = 0;
 
   // Mô phỏng agent phát event trong lúc chạy (như Run Events thật của V4)
   const schedule = [
@@ -110,8 +117,8 @@ app.post('/runs', (req, res) => {
   setTimeout(() => {
     run.status = 'completed';
     run.result =
-      `[MOCK] Agent đã phân tích xong file của bạn.\n` +
-      `- Kích thước file nhận được: ${run.uploadedBytes} bytes\n` +
+      `[MOCK] Agent đã phân tích xong các file của bạn.\n` +
+      `- Đã nhận ${run.uploadedFiles} file, tổng ${run.uploadedBytes} bytes\n` +
       `- Task: ${run.task.slice(0, 80)}…\n` +
       `- Thời gian mô phỏng: ${TERMINAL_DELAY_MS / 1000}s`;
   }, TERMINAL_DELAY_MS);

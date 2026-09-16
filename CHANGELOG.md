@@ -10,6 +10,74 @@
 
 ---
 
+## [1.2.1] - 2026-09-16
+
+### Added — Link tải kết quả ngay trên web sau khi hoàn thành (lượt làm việc thứ 4)
+
+- **Server lưu kết quả vào thư mục `outputs/`** — `server.js`:
+  - Khi job `completed`: ghi `outputs/<jobId>.txt` (kết quả + header metadata: runId, model, file gốc, ZIP extracted, tokens, chi phí, thời gian) và `outputs/<jobId>.json` (response đầy đủ).
+  - Endpoint mới `GET /api/jobs/{jobId}/download?type=txt|json`: trả file với `Content-Disposition: attachment`; ưu tiên file trên đĩa (sống sót sau khi job hết hạn trong RAM 30 phút), fallback sinh tại chỗ từ job trong RAM; `type` sai → 400, không có kết quả → 404.
+  - Dọn dẹp: mỗi giờ xoá file `<uuid>.txt/.json` cũ quá `OUTPUT_FILE_TTL_MS` (mặc định 24h); regex chỉ khớp file kết quả — không đụng file khác trong `outputs/` (ví dụ BrowserUse-WebApp.zip).
+  - Tạo thư mục `outputs/` lúc khởi động (`fs.mkdirSync recursive`); lỗi ghi đĩa không làm fail job (chỉ `[WARN]`).
+- **UI** — `public/index.html`: sau khi hoàn thành hiển thị hàng nút **"Tải .txt"** (nền indigo) và **"Tải .json"** (viền slate) trỏ tới endpoint download, kèm icon mũi tên xuống; chỉ hiện khi có `jobId`.
+
+### Changed
+
+- `package.json` → 1.2.1; `.gitignore` thêm `outputs/`; `.env.example` thêm `OUTPUT_DIR`, `OUTPUT_FILE_TTL_MS`.
+- `REQUIREMENTS.md` bump 1.2.1: FR-11, endpoint `/api/jobs/{id}/download` trong bảng API, 2 biến env mới, thêm tiêu chí nghiệm thu.
+
+### Quyết định kỹ thuật
+
+1. **File trên đĩa thay vì chỉ RAM**: link tải phải hoạt động sau khi job hết hạn 30 phút — file `outputs/` tồn tại 24h, độc lập với RAM.
+2. **Content-Disposition attachment**: trình duyệt tải thẳng về máy thay vì mở tab mới.
+3. **Regex dọn dẹp nghiêm ngặt** `^[0-9a-f-]{36}\.(txt|json)$`: chỉ xoá đúng file kết quả, an toàn cho mọi file khác người dùng để trong `outputs/`.
+
+### Verified
+
+- ✅ Mock E2E: job completed → `outputs/<jobId>.txt` và `.json` tồn tại đúng nội dung (txt có header metadata + text kết quả) → `GET .../download?type=txt` trả 200 + attachment đúng bytes file; `type=json` trả JSON đầy đủ.
+- ✅ Download `type=pdf` → 400; jobId ngẫu nhiên → 404 JSON tiếng Việt.
+- ✅ Hồi quy: job thường + ZIP vẫn chạy trọn vẹn, UI hiển thị nút tải.
+
+---
+
+## [1.2.0] - 2026-09-16
+
+### Added — Xử lý file .zip + task lâu không lỗi (lượt làm việc thứ 3)
+
+- **Hỗ trợ upload file .zip** — `server.js`:
+  - Nhận diện ZIP theo mime type hoặc đuôi `.zip` (`isZipFile`); giải nén trong RAM bằng `adm-zip` (dependency mới).
+  - Upload từng file vào workspace theo lô ≤10 file/request (giới hạn API v4), đính kèm `attachedFileIds` (≤20).
+  - Bảo vệ: chỉ lấy tên file (bỏ đường dẫn → chống path traversal), tự đổi tên khi trùng (`a (2).txt`), bỏ `__MACOSX`/`.DS_Store`/`._*`/file rỗng, giới hạn `MAX_ZIP_FILES` (50) + `MAX_ZIP_TOTAL_EXTRACT_BYTES` (100MB), chặn entry có khai báo size vượt giới hạn TRƯỚC khi giải nén (chống zip bomb).
+  - `buildTaskPrompt(files, instructions)` mới: prompt liệt kê danh sách file (tối đa 30 tên + "và X file khác").
+  - Response kèm `file.isZip / extractedCount / extractedFiles`.
+- **UI ZIP** — `public/index.html`: dropzone ghi rõ "hỗ trợ .zip (tự giải nén, tối đa 50 file)"; chip vàng "ZIP → N file đã giải nén" (hover xem danh sách file + dung lượng); progress message hiển thị "Đang giải nén ZIP…", "Đang tải file "X" lên…" khi upload nhiều file.
+- **Timeout 2 tầng (task lâu không bị lỗi)** — `server.js`:
+  - `TASK_TIMEOUT_MS` **mềm** (mặc định mới: 300s → **900s**): qua ngưỡng KHÔNG dừng job — chỉ đổi message "Task đang lâu hơn dự kiến — agent vẫn đang chạy…" và ghi `[WARN]` log, tiếp tục poll.
+  - `TASK_HARD_TIMEOUT_MS` **cứng** (mới, mặc định 1800s): tới ngưỡng này job mới dừng với 504 kèm runId + gợi ý tăng biến env.
+- **UI chịu lỗi mạng tốt hơn**: `MAX_POLL_FAILURES` 3 → 5 lần poll lỗi liên tiếp mới báo lỗi.
+
+### Changed
+
+- `processJob`: tách logic upload ra vòng lô BATCH=10; progress 8→20% chia đều theo số file; mock `test/mock-api.js` đếm tổng số file + tổng bytes đã PUT.
+- `/api/health` thêm `maxZipFiles`, `maxZipTotalExtractBytes`, `taskHardTimeoutMs`.
+- `.env.example`, `REQUIREMENTS.md` (bump 1.2.0: FR-10, NFR-3 mới, bảng env, nghiệm thu), `README.md`, `package.json` → 1.2.0.
+
+### Quyết định kỹ thuật
+
+1. **Giải nén ở server thay vì để agent tự unzip**: chắc chắn hoạt động với mọi model, prompt liệt kê file rõ ràng, tránh phụ thuộc vào môi trường shell của agent.
+2. **Bỏ đường dẫn khi giải nén (chỉ giữ basename)**: workspace upload API lưu theo tên; vừa chống path traversal vừa tránh trùng lặp thư mục ảo; trùng tên thì tự thêm hậu tố `(n)`.
+3. **Timeout mềm không fail**: đúng yêu cầu "thời gian xử lý lâu không bị lỗi" — 15 phút đầu im lặng chờ, sau đó cảnh báo nhưng vẫn chờ tới 30 phút.
+
+### Verified
+
+- ✅ Mock E2E ZIP (2 file trong zip): job 202 → progress "Đang giải nén ZIP…" → mock nhận **2 file** (đúng bytes từng file) → completed, prompt liệt kê đúng 2 tên file, response có `isZip: true, extractedCount: 2`.
+- ✅ Mock ZIP 60 file → 400 "ZIP chứa quá nhiều file (giới hạn 50)".
+- ✅ Hồi quy file thường: vẫn chạy đầy đủ, mock báo "1 file, 504 bytes" (sửa mock: counter reset sau mỗi run).
+- ✅ Test thật với Browser Use Cloud API v4 (2026-09-16, local): upload ZIP (CSV + TXT) + yêu cầu đọc cả 2 file → agent trả đúng: CSV 10 bản ghi / tổng doanh thu 96.875.000; TXT 50 dòng ký tự X — 17.6s, $0.0039, progress 37→73→100%.
+- ✅ `node --check` sạch; server 3000 restart OK (test local). Cloudflared vẫn được hướng dẫn trong README nhưng không còn nằm trong quy trình kiểm thử.
+
+---
+
 ## [1.1.0] - 2026-09-15
 
 ### Added — Yêu cầu tuỳ chỉnh + % tiến trình (lượt làm việc thứ 2)

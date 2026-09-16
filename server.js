@@ -24,9 +24,11 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const axios = require('axios');
 const multer = require('multer');
+const AdmZip = require('adm-zip');
 
 /* ============================== CẤU HÌNH ============================== */
 
@@ -37,9 +39,18 @@ const config = {
   apiBaseUrl: (process.env.BROWSER_USE_BASE_URL || 'https://api.browser-use.com/api/v4').replace(/\/+$/, ''),
   model: (process.env.BROWSER_USE_MODEL || '').trim(),
   pollIntervalMs: Math.max(1000, Number(process.env.POLL_INTERVAL_MS || 2000)),
-  taskTimeoutMs: Math.max(10000, Number(process.env.TASK_TIMEOUT_MS || 300000)),
+  // Timeout 2 tầng (v1.2.0): qua ngưỡng MỀM chỉ cảnh báo "đang lâu hơn dự kiến";
+  // tới ngưỡng CỨNG job mới dừng với 504 — task dài không bị lỗi sớm.
+  taskTimeoutMs: Math.max(60000, Number(process.env.TASK_TIMEOUT_MS || 900000)), // mềm: 15 phút
+  taskHardTimeoutMs: Math.max(60000, Number(process.env.TASK_HARD_TIMEOUT_MS || 1800000)), // cứng: 30 phút
   maxFileSizeBytes: Number(process.env.MAX_FILE_SIZE_BYTES || 10 * 1024 * 1024),
   corsOrigin: process.env.CORS_ORIGIN || '*',
+  // Giới hạn giải nén ZIP (chống zip bomb)
+  maxZipFiles: Number(process.env.MAX_ZIP_FILES || 50),
+  maxZipTotalExtractBytes: Number(process.env.MAX_ZIP_TOTAL_EXTRACT_BYTES || 100 * 1024 * 1024),
+  // Thư mục lưu kết quả để tải về + thời gian giữ file trước khi tự xoá
+  outputDir: process.env.OUTPUT_DIR ? path.resolve(process.env.OUTPUT_DIR) : path.join(__dirname, 'outputs'),
+  outputFileTtlMs: Number(process.env.OUTPUT_FILE_TTL_MS || 24 * 60 * 60 * 1000),
 };
 
 // Giới hạn 50MB/file của Workspace Upload API bên Browser Use
@@ -50,6 +61,62 @@ const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
 const MAX_INSTRUCTIONS_CHARS = 5000;
 // Job hoàn tất được giữ trong RAM 30 phút cho UI tra cứu, sau đó tự xoá
 const JOB_TTL_MS = 30 * 60 * 1000;
+
+/* ============================== KẾT QUẢ TẢI VỀ (outputs/) ============================== */
+
+/** Định dạng kết quả job thành file .txt dễ đọc (có header metadata) */
+function resultToText(result) {
+  const lines = [];
+  lines.push('KẾT QUẢ XỬ LÝ — BROWSER USE FILE ANALYZER');
+  lines.push(`Thời điểm   : ${new Date().toISOString()}`);
+  lines.push(`Run ID      : ${result.runId}`);
+  lines.push(`Trạng thái  : ${result.status}`);
+  lines.push(`Model       : ${(result.run && result.run.model) || '(default)'}`);
+  if (result.file) {
+    lines.push(`File gốc    : ${result.file.name} (${result.file.size} bytes)`);
+    if (result.file.isZip) {
+      const names = (result.file.extractedFiles || []).map((f) => f.name).join(', ');
+      lines.push(`Giải nén ZIP: ${result.file.extractedCount} file — ${names}`);
+    }
+  }
+  lines.push(`Tokens      : ${result.result.inputTokens} vào / ${result.result.outputTokens} ra`);
+  lines.push(`Chi phí     : $${result.result.costUsd}`);
+  lines.push(`Thời gian   : ${(result.elapsedMs / 1000).toFixed(1)}s`);
+  lines.push('='.repeat(60));
+  lines.push('');
+  lines.push(result.result.text);
+  return lines.join('\n');
+}
+
+/** Ghi kết quả hoàn thành ra outputs/<jobId>.txt và .json để UI cấp link tải về */
+function saveResultFiles(jobId, result) {
+  try {
+    fs.writeFileSync(path.join(config.outputDir, `${jobId}.txt`), resultToText(result), 'utf8');
+    fs.writeFileSync(path.join(config.outputDir, `${jobId}.json`), JSON.stringify(result, null, 2), 'utf8');
+    return true;
+  } catch (err) {
+    console.warn(`[WARN] Không ghi được file kết quả outputs/${jobId}.*: ${err.message}`);
+    return false;
+  }
+}
+
+// Dọn file kết quả cũ trong outputs/ mỗi giờ (chỉ xoá file <uuid>.txt/.json, không đụng file khác)
+setInterval(() => {
+  try {
+    const cutoff = Date.now() - config.outputFileTtlMs;
+    for (const name of fs.readdirSync(config.outputDir)) {
+      if (!/^[0-9a-f-]{36}\.(txt|json)$/i.test(name)) continue;
+      const filePath = path.join(config.outputDir, name);
+      try {
+        if (fs.statSync(filePath).mtimeMs < cutoff) fs.unlinkSync(filePath);
+      } catch {
+        /* file có thể bị xoá song song — bỏ qua */
+      }
+    }
+  } catch {
+    /* thư mục chưa tồn tại — bỏ qua */
+  }
+}, 60 * 60 * 1000).unref();
 
 /* ============================== TIỆN ÍCH ============================== */
 
@@ -71,38 +138,127 @@ function sleep(ms) {
 }
 
 /**
- * Tạo prompt cho agent:
- * - Có instructions → thực hiện đúng yêu cầu người dùng với file đính kèm
+ * Tạo prompt cho agent. `fileInfos` = danh sách file đã upload vào workspace:
+ * - Có instructions → thực hiện đúng yêu cầu người dùng với các file
  * - Không có → prompt phân tích tổng quát (hành vi mặc định)
  */
-function buildTaskPrompt(fileName, instructions) {
+function buildTaskPrompt(fileInfos, instructions) {
+  const names = fileInfos.map((f) => `- "${f.name}" (${f.size} bytes)`);
+  const listText =
+    names.length <= 30 ? names.join('\n') : `${names.slice(0, 30).join('\n')}\n… và ${names.length - 30} file khác`;
+  const fileList = `Trong workspace của run này có ${fileInfos.length} file được đính kèm (nằm trong thư mục uploads/):\n${listText}`;
+
   if (instructions) {
     return [
-      'Bạn là trợ lý AI đa năng. Trong workspace của run này có một file được đính kèm.',
-      `Tên file: "${fileName}" (nằm trong thư mục uploads/).`,
+      'Bạn là trợ lý AI đa năng.',
+      fileList,
       '',
       '=== YÊU CẦU TỪ NGƯỜI DÙNG ===',
       instructions,
       '=== HẾT YÊU CẦU ===',
       '',
       'Lưu ý:',
-      '- Thực hiện yêu cầu trên với file đính kèm (nếu yêu cầu cần dùng file).',
+      '- Thực hiện yêu cầu trên với các file đính kèm (nếu yêu cầu cần dùng file).',
       '- Nếu yêu cầu là viết code: trình bày code đầy đủ trong khối markdown, đúng ngôn ngữ lập trình, có giải thích.',
-      '- Nếu yêu cầu là xử lý/số liệu: nêu rõ dữ liệu lấy từ đâu trong file.',
+      '- Nếu yêu cầu là xử lý/số liệu: nêu rõ dữ liệu lấy từ file nào.',
       '- Phần giải thích bằng tiếng Việt; giữ nguyên code, số liệu, thuật ngữ gốc.',
     ].join('\n');
   }
 
   return [
-    'Bạn là trợ lý phân tích dữ liệu. Trong workspace của run này có một file được đính kèm.',
-    `Tên file: "${fileName}" (nằm trong thư mục uploads/).`,
+    'Bạn là trợ lý phân tích dữ liệu.',
+    fileList,
     'Hãy thực hiện các bước sau:',
-    '1. Đọc và hiểu toàn bộ nội dung file.',
-    '2. Tóm tắt ngắn gọn nội dung chính của file.',
+    '1. Đọc và hiểu nội dung các file.',
+    '2. Tóm tắt ngắn gọn nội dung chính (từng file nếu có nhiều).',
     '3. Nêu các điểm quan trọng, số liệu nổi bật hoặc vấn đề phát hiện được (nếu có).',
     '4. Đưa ra nhận xét và đề xuất cải thiện (nếu phù hợp).',
     'Trả lời bằng tiếng Việt, trình bày rõ ràng, có cấu trúc, dễ đọc.',
   ].join('\n');
+}
+
+/** File có phải ZIP không (theo mime type hoặc đuôi .zip) */
+function isZipFile(file) {
+  const ct = (file.contentType || '').toLowerCase();
+  return (
+    ct === 'application/zip' ||
+    ct === 'application/x-zip-compressed' ||
+    ct === 'application/x-zip' ||
+    /\.zip$/i.test(file.name || '')
+  );
+}
+
+/**
+ * Giải nén ZIP trong bộ nhớ, trả về danh sách file [{name, size, buffer}].
+ * Bảo vệ:
+ * - Chỉ lấy tên file (bỏ đường dẫn) → chống path traversal, chống trùng tên (thêm hậu tố)
+ * - Bỏ thư mục, __MACOSX, .DS_Store, file rỗng
+ * - Chặn trước khi giải nén entry nào có khai báo size > giới hạn (chống zip bomb)
+ * - Giới hạn số file (MAX_ZIP_FILES) và tổng dung lượng sau giải nén
+ */
+function extractZipEntries(buffer, zipFileName) {
+  let zip;
+  try {
+    zip = new AdmZip(buffer);
+  } catch (err) {
+    throw new ApiError(400, `Không đọc được file ZIP "${zipFileName}": file có thể bị hỏng hoặc không phải định dạng ZIP chuẩn.`);
+  }
+
+  const files = [];
+  const usedNames = new Set();
+  let totalBytes = 0;
+
+  for (const entry of zip.getEntries()) {
+    if (entry.isDirectory) continue;
+
+    const rawName = String(entry.entryName || '').replace(/\\/g, '/');
+    const segments = rawName.split('/');
+    const base = path.posix.basename(rawName);
+    if (
+      !base ||
+      base === '.DS_Store' ||
+      base.startsWith('._') ||
+      segments.some((seg) => seg === '__MACOSX')
+    ) {
+      continue; // rác metadata của macOS — bỏ qua, không tính là file bỏ sót
+    }
+
+    if (Number(entry.header.size) > config.maxZipTotalExtractBytes) {
+      throw new ApiError(400, `File "${base}" sau giải nén vượt quá giới hạn ${Math.round(config.maxZipTotalExtractBytes / 1024 / 1024)}MB.`);
+    }
+    if (files.length >= config.maxZipFiles) {
+      throw new ApiError(400, `ZIP chứa quá nhiều file (giới hạn ${config.maxZipFiles}). Hãy nén thành nhiều ZIP nhỏ hơn hoặc upload từng file.`);
+    }
+
+    let data;
+    try {
+      data = entry.getData();
+    } catch (err) {
+      throw new ApiError(400, `Không giải nén được file "${base}" trong ZIP (entry có thể bị hỏng).`);
+    }
+    if (!data || data.length === 0) continue;
+
+    let name = base;
+    let n = 2;
+    while (usedNames.has(name)) {
+      const parsed = path.parse(base);
+      name = `${parsed.name} (${n})${parsed.ext}`;
+      n += 1;
+    }
+    usedNames.add(name);
+
+    totalBytes += data.length;
+    if (totalBytes > config.maxZipTotalExtractBytes) {
+      throw new ApiError(400, `Tổng dung lượng sau giải nén vượt quá giới hạn ${Math.round(config.maxZipTotalExtractBytes / 1024 / 1024)}MB.`);
+    }
+
+    files.push({ name, size: data.length, buffer: data, contentType: 'application/octet-stream' });
+  }
+
+  if (files.length === 0) {
+    throw new ApiError(400, `ZIP "${zipFileName}" rỗng hoặc không chứa file hợp lệ.`);
+  }
+  return files;
 }
 
 /**
@@ -227,13 +383,21 @@ async function drainEventsAndUpdateProgress(job, runId) {
  *   2. GET /runs/{id}/events  (lấy delta để cập nhật tiến trình)
  * - Tôn trọng 429 (Retry-After / retry_after_seconds)
  * - Chấp nhận tối đa 3 lần poll lỗi liên tiếp rồi mới bỏ cuộc
- * - Quá TASK_TIMEOUT_MS → 504 (run phía Browser Use có thể vẫn đang chạy)
+ * - Timeout 2 tầng (v1.2.0): qua TASK_TIMEOUT_MS (mềm) chỉ cảnh báo trên UI,
+ *   tới TASK_HARD_TIMEOUT_MS (cứng) job mới dừng với 504 kèm runId.
  */
 async function waitForRunCompletion(job, runId) {
-  const deadline = Date.now() + config.taskTimeoutMs;
+  const softDeadline = Date.now() + config.taskTimeoutMs;
+  const hardDeadline = Date.now() + config.taskHardTimeoutMs;
   let consecutiveFailures = 0;
+  let softWarned = false;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < hardDeadline) {
+    if (!softWarned && Date.now() >= softDeadline) {
+      softWarned = true;
+      job.message = 'Task đang lâu hơn dự kiến — agent vẫn đang chạy, vui lòng chờ thêm…';
+      console.warn(`[WARN] Job ${job.id} vượt ${Math.round(config.taskTimeoutMs / 1000)}s (soft timeout) — tiếp tục chờ tới giới hạn cứng ${Math.round(config.taskHardTimeoutMs / 1000)}s.`);
+    }
     try {
       const { data: statusData } = await buApi.get(`/runs/${runId}/status`);
       await drainEventsAndUpdateProgress(job, runId);
@@ -265,7 +429,7 @@ async function waitForRunCompletion(job, runId) {
 
   const timeoutError = new ApiError(
     504,
-    `Agent chưa hoàn thành sau ${Math.round(config.taskTimeoutMs / 1000)} giây. Run vẫn có thể đang chạy trên Browser Use — kiểm tra dashboard với Run ID.`,
+    `Agent chưa hoàn thành sau ${Math.round(config.taskHardTimeoutMs / 1000)} giây. Run vẫn có thể đang chạy trên Browser Use — kiểm tra dashboard với Run ID. Nếu task thường xuyên dài hơn, hãy tăng TASK_HARD_TIMEOUT_MS trong file .env.`,
     { runId }
   );
   // Giữ lại workspace để run có thể tiếp tục chạy phía cloud
@@ -320,50 +484,82 @@ async function processJob(job, uploadedFile, instructions) {
       contentType: uploadedFile.mimetype || 'application/octet-stream',
       size: uploadedFile.size,
     };
-    const task = buildTaskPrompt(file.name, instructions);
+
+    // --- Bước 0: Nếu là ZIP → giải nén trong bộ nhớ ---
+    const isZip = isZipFile(file);
+    let workspaceFiles;
+    if (isZip) {
+      job.message = `Đang giải nén ZIP "${file.name}"…`;
+      workspaceFiles = extractZipEntries(uploadedFile.buffer, file.name);
+      job.message = `Đã giải nén ${workspaceFiles.length} file từ ZIP — đang chuẩn bị upload…`;
+    } else {
+      workspaceFiles = [{ ...file, buffer: uploadedFile.buffer }];
+    }
+    const task = buildTaskPrompt(workspaceFiles, instructions);
 
     // --- Bước 1: Tạo workspace ---
-    job.message = 'Tạo workspace trên Browser Use…';
+    job.message = job.message || 'Tạo workspace trên Browser Use…';
     job.progress = 4;
     const workspaceRes = await withStep('Tạo workspace trên Browser Use', () =>
       buApi.post('/workspaces', { name: `webapp-${Date.now()}` })
     );
     job.workspaceId = workspaceRes.data.id;
     if (!job.workspaceId) throw new ApiError(502, 'Browser Use không trả về workspace id.');
-    job.progress = 10;
+    job.progress = 8;
 
-    // --- Bước 2: Xin presigned URL ---
-    job.message = 'Đăng ký upload file…';
-    const uploadRes = await withStep('Đăng ký upload file', () =>
-      buApi.post(`/workspaces/${job.workspaceId}/files/upload`, {
-        files: [{ name: file.name, contentType: file.contentType, size: file.size }],
-      })
-    );
-    const fileInfo = uploadRes.data.files && uploadRes.data.files[0];
-    if (!fileInfo || !fileInfo.uploadUrl) {
-      throw new ApiError(502, 'Browser Use không trả về presigned upload URL.');
+    // --- Bước 2+3: Upload từng file (lô tối đa 10 file/request theo API v4) ---
+    const uploadIds = [];
+    const BATCH = 10;
+    for (let i = 0; i < workspaceFiles.length; i += BATCH) {
+      const batch = workspaceFiles.slice(i, i + BATCH);
+
+      job.message = `Đăng ký upload file ${i + 1}–${i + batch.length}/${workspaceFiles.length}…`;
+      const uploadRes = await withStep('Đăng ký upload file', () =>
+        buApi.post(`/workspaces/${job.workspaceId}/files/upload`, {
+          files: batch.map((f) => ({
+            name: f.name,
+            contentType: f.contentType || 'application/octet-stream',
+            size: f.size,
+          })),
+        })
+      );
+      const items = uploadRes.data.files || [];
+      if (items.length !== batch.length) {
+        throw new ApiError(502, 'Browser Use trả về số presigned URL không khớp số file đăng ký.');
+      }
+
+      for (let idx = 0; idx < batch.length; idx++) {
+        const f = batch[idx];
+        const info = items[idx];
+        if (!info || !info.uploadUrl) {
+          throw new ApiError(502, `Browser Use không trả về presigned upload URL cho file "${f.name}".`);
+        }
+        job.message = `Đang tải file "${f.name}" lên Browser Use…`;
+        await withStep(`Tải file "${f.name}" lên Browser Use`, () =>
+          axios.put(info.uploadUrl, f.buffer, {
+            // Presigned URL bị ghim theo Content-Type + Content-Length khai báo
+            headers: {
+              'Content-Type': f.contentType || 'application/octet-stream',
+              'Content-Length': String(f.size),
+            },
+            timeout: 120000,
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+          })
+        );
+        uploadIds.push(info.id);
+      }
+      job.progress = Math.min(20, 8 + Math.round((12 * Math.min(i + BATCH, workspaceFiles.length)) / workspaceFiles.length));
     }
 
-    // --- Bước 3: PUT bytes file ---
-    job.message = 'Đang tải file lên Browser Use…';
-    job.progress = 14;
-    await withStep('Tải file lên Browser Use', () =>
-      axios.put(fileInfo.uploadUrl, uploadedFile.buffer, {
-        // Presigned URL bị ghim theo Content-Type + Content-Length khai báo
-        headers: {
-          'Content-Type': file.contentType,
-          'Content-Length': String(file.size),
-        },
-        timeout: 120000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-      })
-    );
-
-    // --- Bước 4: Tạo run ---
+    // --- Bước 4: Tạo run (attachedFileIds tối đa 20 theo API v4) ---
     job.message = 'Khởi chạy agent…';
     job.progress = 20;
-    const runBody = { task, workspaceId: job.workspaceId, attachedFileIds: [fileInfo.id] };
+    const runBody = {
+      task,
+      workspaceId: job.workspaceId,
+      attachedFileIds: uploadIds.slice(0, 20),
+    };
     if (config.model) runBody.model = config.model;
 
     const runRes = await withStep('Tạo run trên Browser Use', () => buApi.post('/runs', runBody));
@@ -399,7 +595,14 @@ async function processJob(job, uploadedFile, instructions) {
         outputTokens: run.totalOutputTokens,
         costUsd: run.totalCostUsd,
       },
-      file,
+      file: isZip
+        ? {
+            ...file,
+            isZip: true,
+            extractedCount: workspaceFiles.length,
+            extractedFiles: workspaceFiles.map((f) => ({ name: f.name, size: f.size })),
+          }
+        : file,
       elapsedMs: Date.now() - job.startedAt,
       run,
     };
@@ -407,6 +610,8 @@ async function processJob(job, uploadedFile, instructions) {
     job.phase = 'done';
     job.progress = 100;
     job.message = 'Hoàn tất';
+    // Lưu kết quả ra outputs/ để cấp link tải về trên web (vẫn hoạt động kể cả khi job hết hạn trong RAM)
+    saveResultFiles(job.id, job.result);
   } catch (err) {
     keepWorkspace = err.keepWorkspace === true;
     if (err instanceof ApiError) {
@@ -464,7 +669,10 @@ app.get('/api/health', (req, res) => {
     apiKeyConfigured: Boolean(config.apiKey),
     model: config.model || '(default của Browser Use)',
     maxFileSizeBytes: config.maxFileSizeBytes,
+    maxZipFiles: config.maxZipFiles,
+    maxZipTotalExtractBytes: config.maxZipTotalExtractBytes,
     taskTimeoutMs: config.taskTimeoutMs,
+    taskHardTimeoutMs: config.taskHardTimeoutMs,
     uptimeSeconds: Math.round(process.uptime()),
   });
 });
@@ -552,6 +760,39 @@ app.get('/api/jobs/:id', (req, res) => {
   });
 });
 
+/**
+ * GET /api/jobs/:id/download?type=txt|json — tải file kết quả về máy.
+ * Ưu tiên file đã ghi trong outputs/ (sống sót sau khi job hết hạn trong RAM);
+ * nếu chưa có trên đĩa thì sinh tại chỗ từ job trong RAM.
+ */
+app.get('/api/jobs/:id/download', (req, res) => {
+  const type = String(req.query.type || 'txt').toLowerCase();
+  if (type !== 'txt' && type !== 'json') {
+    return res.status(400).json({ success: false, error: 'Tham số type chỉ nhận giá trị "txt" hoặc "json".' });
+  }
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) {
+    return res.status(400).json({ success: false, error: 'jobId không hợp lệ.' });
+  }
+
+  const filePath = path.join(config.outputDir, `${req.params.id}.${type}`);
+  if (fs.existsSync(filePath)) {
+    return res.download(filePath, `${req.params.id}.${type}`);
+  }
+
+  const job = jobs.get(req.params.id);
+  if (job && job.status === 'completed' && job.result) {
+    const content = type === 'txt' ? resultToText(job.result) : JSON.stringify(job.result, null, 2);
+    res.set('Content-Type', `${type === 'txt' ? 'text/plain' : 'application/json'}; charset=utf-8`);
+    res.set('Content-Disposition', `attachment; filename="${req.params.id}.${type}"`);
+    return res.send(content);
+  }
+
+  return res.status(404).json({
+    success: false,
+    error: 'Không tìm thấy kết quả để tải về (job chưa hoàn thành, thất bại hoặc đã hết hạn).',
+  });
+});
+
 /* 404 cho các API lạ (không ảnh hưởng static) */
 app.use('/api', (req, res) => {
   res.status(404).json({ success: false, error: `Không tìm thấy endpoint API: ${req.method} ${req.originalUrl}` });
@@ -604,12 +845,20 @@ app.use((err, req, res, next) => {
 
 /* ============================== KHỞI ĐỘNG ============================== */
 
+// Tạo thư mục outputs/ nếu chưa có (chứa file kết quả để tải về)
+try {
+  fs.mkdirSync(config.outputDir, { recursive: true });
+} catch (err) {
+  console.warn(`[WARN] Không tạo được thư mục outputs ${config.outputDir}: ${err.message}`);
+}
+
 app.listen(config.port, () => {
   console.log(`Server chạy tại: http://localhost:${config.port}`);
   if (!config.apiKey) {
     console.warn('[WARN] Chưa cấu hình BROWSER_USE_API_KEY — app sẽ chạy nhưng POST /api/process sẽ báo lỗi. Tạo file .env từ .env.example.');
   }
   console.log(`Browser Use API: ${config.apiBaseUrl} | Model: ${config.model || 'default'}`);
+  console.log(`Thư mục kết quả tải về: ${config.outputDir} (giữ file ${Math.round(config.outputFileTtlMs / 3600000)}h)`);
 });
 
 module.exports = app;
